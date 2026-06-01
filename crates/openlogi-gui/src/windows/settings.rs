@@ -72,7 +72,7 @@ impl SettingsView {
         // rather than writing from here.
         cx.refresh_windows();
         crate::app_menu::rebuild(cx);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         crate::platform::tray::request_refresh();
     }
 }
@@ -102,6 +102,11 @@ impl Render for SettingsView {
             (a.launch_at_login, a.check_for_updates)
         });
 
+        #[cfg(target_os = "macos")]
+        let launch_desc = tr!("Automatically start OpenLogi when you log in to macOS.");
+        #[cfg(not(target_os = "macos"))]
+        let launch_desc = tr!("Automatically start OpenLogi when you log in.");
+
         let general = GroupBox::new()
             .title(group_title(IconName::Settings, tr!("General")))
             .child(setting_row(
@@ -115,7 +120,7 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
                 tr!("Launch at login"),
-                tr!("Automatically start OpenLogi when you log in to macOS."),
+                launch_desc,
                 pal,
             ))
             .child(setting_row(
@@ -135,12 +140,27 @@ impl Render for SettingsView {
                 pal,
             ));
 
-        // The menu-bar (status item) is macOS-only, so its toggle is too.
-        #[cfg(target_os = "macos")]
+        // The tray toggle exists on platforms with a tray (macOS menu bar /
+        // Windows notification area), with platform-appropriate wording.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let general = {
             let in_menu_bar = cx
                 .try_global::<AppState>()
                 .is_some_and(|s| s.app_settings().show_in_menu_bar);
+
+            #[cfg(target_os = "macos")]
+            let (tray_title, tray_desc) = (
+                tr!("Show in menu bar"),
+                tr!("Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."),
+            );
+            #[cfg(target_os = "windows")]
+            let (tray_title, tray_desc) = (
+                tr!("Show in tray"),
+                tr!(
+                    "Keep OpenLogi's icon in the notification area so it keeps running when you close the window."
+                ),
+            );
+
             general.child(setting_row(
                 Switch::new("show-in-menu-bar")
                     .checked(in_menu_bar)
@@ -151,10 +171,8 @@ impl Render for SettingsView {
                         });
                         cx.notify();
                     })),
-                tr!("Show in menu bar"),
-                tr!(
-                    "Keep OpenLogi's icon in the menu bar. When off, it stays in the Dock instead."
-                ),
+                tray_title,
+                tray_desc,
                 pal,
             ))
         };

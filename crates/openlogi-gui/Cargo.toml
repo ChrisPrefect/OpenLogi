@@ -41,6 +41,18 @@ gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3
 cocoa = "0.26"
 objc = "0.2"
 
+# Notification-area (tray) FFI + the Run-key registry write for launch-at-login —
+# GPUI exposes neither. Same windows-sys the hook uses.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+] }
+
 # Mirrors [workspace.lints], plus an allow for the legacy `cfg(cargo-clippy)`
 # check emitted by objc 0.2's macros (same as openlogi-hook). unsafe_code stays
 # denied; the menubar module opts in locally with #[expect(unsafe_code)].

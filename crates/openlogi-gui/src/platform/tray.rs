@@ -16,6 +16,11 @@ pub use macos::{
     set_visible, show_in_dock,
 };
 
+#[cfg(target_os = "windows")]
+pub use windows::{
+    TrayEvent, install, refresh_labels, request_refresh, set_device_status, set_visible,
+};
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::sync::OnceLock;
@@ -191,6 +196,295 @@ mod macos {
             && tx.send(event).is_err()
         {
             warn!(?event, "menu-bar event dropped — GPUI loop gone");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[allow(
+    unsafe_code,
+    reason = "the notification-area icon is only reachable via raw Shell/Win32 FFI"
+)]
+mod windows {
+    //! Windows notification-area (system tray) icon, via `Shell_NotifyIcon`.
+    //!
+    //! A hidden message-only window on a dedicated thread owns the icon and
+    //! services its menu; clicks post a [`TrayEvent`] on the same channel the
+    //! macOS status item uses, drained by `main.rs`. The macOS Dock entry points
+    //! (`show_in_dock` / `hide_from_dock`) have no Windows analogue and are
+    //! simply not part of this module — their call sites are macOS-gated.
+
+    use std::sync::OnceLock;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use tokio::sync::mpsc;
+    use tracing::warn;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Shell::{
+        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+        DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, LoadIconW, MF_GRAYED,
+        MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+        SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+        TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    };
+
+    /// A request raised by clicking the tray icon's menu, or by a live language
+    /// switch asking the drain task to re-localize the device line.
+    #[derive(Debug, Clone, Copy)]
+    pub enum TrayEvent {
+        Open,
+        Quit,
+        /// Recompute the device-status line for the current locale.
+        Refresh,
+    }
+
+    /// `HWND_MESSAGE` — parent for a message-only window (no taskbar presence).
+    const HWND_MESSAGE: HWND = -3isize as HWND;
+    /// Our tray icon's id within the owning window.
+    const TRAY_UID: u32 = 1;
+    /// Icon callback message (mouse events on the tray icon land here).
+    const WM_TRAYICON: u32 = WM_APP + 1;
+    /// Ask the tray window to add / remove the icon (wParam != 0 → add).
+    const WM_TRAY_SETVISIBLE: u32 = WM_APP + 2;
+    /// Ask the tray window to destroy itself.
+    const WM_TRAY_QUIT: u32 = WM_APP + 3;
+    /// Menu command ids.
+    const ID_OPEN: usize = 1;
+    const ID_QUIT: usize = 2;
+
+    static TRAY_TX: OnceLock<mpsc::UnboundedSender<TrayEvent>> = OnceLock::new();
+    /// The tray window handle (as `isize`), or 0 before it's created.
+    static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Whether the icon is currently shown, so visibility toggles are idempotent.
+    static VISIBLE: AtomicBool = AtomicBool::new(false);
+    /// The device-status line, read live when the menu is built.
+    static DEVICE_STATUS: Mutex<String> = Mutex::new(String::new());
+
+    /// UTF-16, null-terminated — the form the wide Win32 APIs expect.
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Install the tray icon on a dedicated thread. Call once at startup.
+    pub fn install(tx: mpsc::UnboundedSender<TrayEvent>) {
+        let _ = TRAY_TX.set(tx);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<isize>();
+        if std::thread::Builder::new()
+            .name("openlogi-tray".into())
+            .spawn(move || tray_thread(&ready_tx))
+            .is_err()
+        {
+            warn!("could not spawn tray thread");
+            return;
+        }
+        // Block until the window exists (or the thread reports failure with 0).
+        match ready_rx.recv() {
+            Ok(0) | Err(_) => warn!("tray window could not be created"),
+            Ok(_) => {}
+        }
+    }
+
+    /// Show or hide the icon without tearing the window down — backs the
+    /// "Show in notification area" setting. No-op before [`install`].
+    pub fn set_visible(visible: bool) {
+        let hwnd = TRAY_HWND.load(Ordering::Relaxed);
+        if hwnd != 0 {
+            // SAFETY: `hwnd` is a live window we created; posting a message to it
+            // is safe and merely queues the visibility toggle on its thread.
+            unsafe {
+                PostMessageW(hwnd as HWND, WM_TRAY_SETVISIBLE, usize::from(visible), 0);
+            }
+        }
+    }
+
+    /// Update the device line shown atop the menu, e.g. `"MX Master 3S · 80%"`.
+    pub fn set_device_status(text: &str) {
+        if let Ok(mut guard) = DEVICE_STATUS.lock() {
+            text.clone_into(&mut guard);
+        }
+    }
+
+    /// No-op on Windows: the menu is rebuilt with current-locale labels every
+    /// time it opens, so there are no persistent labels to re-title.
+    pub fn refresh_labels() {}
+
+    /// Ask the drain task to recompute the device line after a locale switch.
+    pub fn request_refresh() {
+        post(TrayEvent::Refresh);
+    }
+
+    fn post(event: TrayEvent) {
+        if let Some(tx) = TRAY_TX.get()
+            && tx.send(event).is_err()
+        {
+            warn!(?event, "tray event dropped — GPUI loop gone");
+        }
+    }
+
+    /// Body of the tray thread: create the hidden window, add the icon, pump
+    /// messages until `WM_QUIT`.
+    fn tray_thread(ready_tx: &std::sync::mpsc::Sender<isize>) {
+        // SAFETY: a straight-line sequence of Win32 calls with valid arguments;
+        // the window and icon live until the message loop ends.
+        unsafe {
+            let hinstance = GetModuleHandleW(std::ptr::null());
+            let class_name = wide("OpenLogiTrayWindow");
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(wndproc);
+            wc.hInstance = hinstance;
+            wc.lpszClassName = class_name.as_ptr();
+            RegisterClassW(&wc);
+
+            let window_name = wide("OpenLogi");
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                window_name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                hinstance,
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                let _ = ready_tx.send(0);
+                return;
+            }
+
+            TRAY_HWND.store(hwnd as isize, Ordering::Relaxed);
+            add_icon(hwnd);
+            VISIBLE.store(true, Ordering::Relaxed);
+            let _ = ready_tx.send(hwnd as isize);
+
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    /// Build the base `NOTIFYICONDATAW` shared by add / delete.
+    unsafe fn base_nid(hwnd: HWND) -> NOTIFYICONDATAW {
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_UID;
+        nid
+    }
+
+    unsafe fn add_icon(hwnd: HWND) {
+        let mut nid = unsafe { base_nid(hwnd) };
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAYICON;
+        // SAFETY: a stock system icon; null hinstance is the documented usage.
+        nid.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+        let tip = wide("OpenLogi");
+        let n = tip.len().min(nid.szTip.len());
+        nid.szTip[..n].copy_from_slice(&tip[..n]);
+        // SAFETY: `nid` is a fully-initialised NOTIFYICONDATAW for our window.
+        unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
+    }
+
+    unsafe fn delete_icon(hwnd: HWND) {
+        let nid = unsafe { base_nid(hwnd) };
+        // SAFETY: matches the icon added with the same hWnd + uID.
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
+    }
+
+    /// Pop up the right-click menu at the cursor and act on the chosen item.
+    unsafe fn show_context_menu(hwnd: HWND) {
+        let device = DEVICE_STATUS
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| rust_i18n::t!("No device connected").into_owned());
+        let device_w = wide(&device);
+        let open_w = wide(&rust_i18n::t!("Open OpenLogi"));
+        let quit_w = wide(&rust_i18n::t!("Quit OpenLogi"));
+
+        // SAFETY: standard menu construction; every pointer is a live wide buffer
+        // that outlives the TrackPopupMenu call below.
+        unsafe {
+            let menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, device_w.as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(menu, MF_STRING, ID_OPEN, open_w.as_ptr());
+            AppendMenuW(menu, MF_STRING, ID_QUIT, quit_w.as_ptr());
+
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            // Required so the menu dismisses when the user clicks elsewhere.
+            SetForegroundWindow(hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                pt.x,
+                pt.y,
+                0,
+                hwnd,
+                std::ptr::null(),
+            );
+            DestroyMenu(menu);
+
+            match cmd as usize {
+                ID_OPEN => post(TrayEvent::Open),
+                ID_QUIT => post(TrayEvent::Quit),
+                _ => {}
+            }
+        }
+    }
+
+    /// Window procedure for the hidden tray window.
+    unsafe extern "system" fn wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_TRAYICON => {
+                // The low word of lParam carries the mouse message.
+                let mouse = (lparam as u32) & 0xFFFF;
+                if mouse == WM_LBUTTONUP {
+                    post(TrayEvent::Open);
+                } else if mouse == WM_RBUTTONUP {
+                    unsafe { show_context_menu(hwnd) };
+                }
+                0
+            }
+            WM_TRAY_SETVISIBLE => {
+                let want = wparam != 0;
+                let current = VISIBLE.load(Ordering::Relaxed);
+                if want && !current {
+                    unsafe { add_icon(hwnd) };
+                    VISIBLE.store(true, Ordering::Relaxed);
+                } else if !want && current {
+                    unsafe { delete_icon(hwnd) };
+                    VISIBLE.store(false, Ordering::Relaxed);
+                }
+                0
+            }
+            WM_TRAY_QUIT => {
+                unsafe { DestroyWindow(hwnd) };
+                0
+            }
+            WM_DESTROY => {
+                unsafe { delete_icon(hwnd) };
+                unsafe { PostQuitMessage(0) };
+                0
+            }
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
 }

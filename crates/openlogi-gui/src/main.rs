@@ -116,23 +116,23 @@ fn main() -> Result<()> {
         watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
-    // Status-item (tray) click events (Open / Quit), drained by a dedicated
-    // task below. macOS-only: there is no status item on other platforms.
-    #[cfg(target_os = "macos")]
+    // Tray click events (Open / Quit), drained by a dedicated task below.
+    // macOS status item + Windows notification-area icon; no tray on Linux.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let (tray_tx, mut tray_rx) =
         tokio::sync::mpsc::unbounded_channel::<platform::tray::TrayEvent>();
 
-    // Whether the menu-bar (status item) icon is shown. Read once here for the
-    // initial install/visibility; live toggles go through `set_show_in_menu_bar`.
-    #[cfg(target_os = "macos")]
+    // Whether the tray icon is shown. Read once here for the initial
+    // install/visibility; live toggles go through `set_show_in_menu_bar`.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let show_in_menu_bar = initial_config.app_settings.show_in_menu_bar;
 
-    // macOS autostart passes `--minimized` (see launch_agent.rs) to come up in
-    // the tray with no window — only meaningful when the tray is on. No tray
-    // elsewhere (or with it off), so the window always opens.
-    #[cfg(target_os = "macos")]
+    // Autostart passes `--minimized` (see launch_agent.rs) to come up in the
+    // tray with no window — only meaningful when the tray is on. No tray on
+    // Linux (or with it off), so the window always opens there.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let start_minimized = show_in_menu_bar && std::env::args().any(|a| a == "--minimized");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let start_minimized = false;
 
     // `with_assets` registers the embedded app logo ([`app_assets`]) plus the
@@ -161,11 +161,11 @@ fn main() -> Result<()> {
         // window-opening task below.
         platform::updater::install(cx, &initial_config.app_settings);
 
-        // Status-item / tray (macOS only). Always created so the "Show in menu
-        // bar" setting can show / hide it live; its initial visibility follows
-        // the stored setting. The window opens at launch and on demand from its
-        // menu.
-        #[cfg(target_os = "macos")]
+        // Tray icon (macOS status item / Windows notification area). Always
+        // created so the "Show in tray" setting can show / hide it live; its
+        // initial visibility follows the stored setting. The window opens at
+        // launch and on demand from the tray menu.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             platform::tray::install(tray_tx);
             platform::tray::set_visible(show_in_menu_bar);
@@ -210,7 +210,7 @@ fn main() -> Result<()> {
                     // Autostart: live in the menu-bar tray with no window.
                     platform::tray::hide_from_dock();
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 platform::tray::set_device_status(&tray_status(cx));
             });
 
@@ -234,7 +234,7 @@ fn main() -> Result<()> {
                             cx.update_global::<AppState, _>(|state, _| {
                                 state.refresh_inventories(&new_inv, &cache);
                             });
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "windows"))]
                             platform::tray::set_device_status(&tray_status(cx));
                         });
                     }
@@ -277,10 +277,10 @@ fn main() -> Result<()> {
         })
         .detach();
 
-        // Drain status-item menu clicks (macOS only). Kept off the main select
-        // loop above because `tokio::select!` branches can't be `#[cfg]`-gated,
-        // and the whole status item is macOS-only anyway.
-        #[cfg(target_os = "macos")]
+        // Drain tray menu clicks. Kept off the main select loop above because
+        // `tokio::select!` branches can't be `#[cfg]`-gated, and the tray exists
+        // only on macOS / Windows anyway.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         cx.spawn(async move |cx| {
             while let Some(event) = tray_rx.recv().await {
                 cx.update(|cx| match event {
@@ -376,9 +376,9 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     }
 }
 
-/// Format the status-item device line from the live [`AppState`], e.g.
+/// Format the tray device line from the live [`AppState`], e.g.
 /// `"MX Master 3S · 80%"`, or a placeholder when nothing is connected.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn tray_status(cx: &gpui::App) -> String {
     cx.try_global::<AppState>()
         .and_then(AppState::current_record)
