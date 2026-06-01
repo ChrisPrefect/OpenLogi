@@ -40,8 +40,8 @@ two binaries:
 
 Everything is local: bindings live in a plain TOML file, button presses are remapped through the OS event tap, and DPI / SmartShift changes are written straight to the device over HID++.
 
-macOS is supported today; Linux and Windows are coming soon — see
-[Roadmap](#roadmap).
+macOS and Windows are supported today (this fork adds the Windows port); Linux
+is coming soon — see [Roadmap](#roadmap).
 
 ## Roadmap
 
@@ -50,24 +50,28 @@ macOS is supported today; Linux and Windows are coming soon — see
 | Discover Bolt receivers + list paired devices (CLI + GUI) | ✅ |
 | Bluetooth-direct / wired devices (no receiver) | ✅ |
 | Battery percentage / charge state | ✅ (online devices) |
-| Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS |
-| Button remapping via the OS event tap (side Back / Forward today) | ✅ macOS |
-| 37-action catalog + recorded custom keyboard shortcuts | ✅ macOS¹ |
-| DPI control + presets + Cycle / Set-preset actions (HID++ `0x2201`) | ✅ macOS |
-| SmartShift wheel-mode toggle (HID++ `0x2111`) | ✅ macOS |
-| Per-application profile overlays (auto-switch on app focus) | ✅ macOS |
+| Interactive GUI: carousel, mouse diagram, action picker | ✅ macOS · ✅ Windows |
+| Button remapping via the OS event tap (side Back / Forward today) | ✅ macOS · ✅ Windows |
+| 37-action catalog + recorded custom keyboard shortcuts | ✅ macOS¹ · ✅ Windows² |
+| DPI control + presets + Cycle / Set-preset actions (HID++ `0x2201`) | ✅ macOS · ✅ Windows |
+| SmartShift wheel-mode toggle (HID++ `0x2111`) | ✅ macOS · ✅ Windows |
+| Per-application profile overlays (auto-switch on app focus) | ✅ macOS · ✅ Windows |
 | Launch-at-login + opt-in update check | ✅ (TOML only — no settings UI yet) |
 | Gesture-button per-direction bindings | 🟡 configurable; hardware capture pending |
 | Middle / mode-shift / thumbwheel button capture | 🟡 configurable; hook owns side buttons only |
-| Linux / Windows event hook | ❌ stub (`Unsupported`) |
+| macOS event tap (`CGEventTap`) / Windows event hook (`WH_MOUSE_LL`) | ✅ implemented |
+| Linux event hook | ❌ stub (`Unsupported`) |
 | Unifying receivers | ❌ (not yet in `hidpp 0.2`) |
 
 ¹ A few actions (e.g. the media keys) currently log their intended event rather than posting it — tracked as a follow-up.
+² On Windows the macOS-only WindowServer actions map to their closest shell equivalent (Mission Control / App Exposé → Task View, Show Desktop → Win+D, Launchpad → Start, Screenshot → Win+Shift+S).
 
 ## Install
 
 > [!IMPORTANT]
 > Quit **Logi Options+** first — the two applications fight over HID++ access and only one can own a given receiver at a time.
+
+### macOS
 
 Download the signed, notarized `.dmg` from the [latest release](https://github.com/AprilNEA/OpenLogi/releases/latest) and drag `OpenLogi.app` to `/Applications`.
 
@@ -76,6 +80,20 @@ Or install via [Homebrew](https://brew.sh):
 ```sh
 brew install --cask aprilnea/tap/openlogi
 ```
+
+### Windows
+
+Build the GUI from source (this fork) with a static C runtime so the binary runs
+on any Windows 10 (1703+) / 11 machine without a Visual C++ redistributable:
+
+```powershell
+$env:RUSTFLAGS = "-C target-feature=+crt-static"
+cargo build --release -p openlogi-gui
+# → target\release\openlogi-gui.exe (self-contained, ~20 MB)
+```
+
+No installer is needed — copy the `.exe` anywhere and run it. For autostart, drop
+a shortcut into `shell:startup`.
 
 To build from source, see [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 

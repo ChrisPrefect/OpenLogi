@@ -9,8 +9,8 @@
 //! | data   | `$XDG_DATA_HOME`    | `~/.local/share/openlogi`     |
 //!
 //! On Windows `$HOME` falls back to `%USERPROFILE%`, so paths resolve to
-//! `%USERPROFILE%\.config\openlogi` etc. — best-effort until a real Windows
-//! port lands.
+//! `%USERPROFILE%\.config\openlogi` etc. — the same XDG-style layout the
+//! Windows port uses for its config and asset cache.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
