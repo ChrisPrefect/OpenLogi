@@ -9,6 +9,7 @@ fn hook_error_display() {
         HookError::Unsupported,
         HookError::AccessibilityDenied,
         HookError::MacOsTap("test reason".into()),
+        HookError::WindowsHook("test reason".into()),
     ];
     for e in errors {
         assert!(!e.to_string().is_empty(), "empty display for {e:?}");
@@ -43,10 +44,11 @@ fn event_disposition_equality() {
     assert_ne!(EventDisposition::PassThrough, EventDisposition::Suppress);
 }
 
-/// On non-macOS targets, `Hook::start` returns `Unsupported`.
-#[cfg(not(target_os = "macos"))]
+/// On platforms with no hook implementation (Linux), `Hook::start` returns
+/// `Unsupported`. macOS and Windows have real implementations and are excluded.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
-fn non_macos_start_returns_unsupported() {
+fn unsupported_platform_start_returns_unsupported() {
     let result = Hook::start(|_| EventDisposition::PassThrough);
     assert!(matches!(result, Err(HookError::Unsupported)));
 }
@@ -56,4 +58,14 @@ fn non_macos_start_returns_unsupported() {
 #[test]
 fn non_macos_has_accessibility_is_true() {
     assert!(Hook::has_accessibility());
+}
+
+/// On Windows, a hook can be installed and torn down cleanly. This exercises
+/// the full `SetWindowsHookEx` → message-pump → `WM_QUIT` lifecycle.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_start_and_stop_roundtrip() {
+    let hook = Hook::start(|_| EventDisposition::PassThrough)
+        .expect("install WH_MOUSE_LL hook on Windows");
+    hook.stop();
 }

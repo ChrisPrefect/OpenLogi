@@ -1,9 +1,10 @@
 //! OS-level mouse-event hook for OpenLogi.
 //!
 //! On macOS the hook is implemented with `CGEventTap` (the same primitive used
-//! by Logi Options+ and external-reference). Linux and Windows return
-//! [`HookError::Unsupported`] from [`Hook::start`] — stubs that let the
-//! workspace compile on all platforms without feature-gating callers.
+//! by Logi Options+ and external-reference); on Windows with a `WH_MOUSE_LL`
+//! low-level mouse hook. Linux returns [`HookError::Unsupported`] from
+//! [`Hook::start`] — a stub that lets the workspace compile on all platforms
+//! without feature-gating callers.
 //!
 //! # Usage
 //!
@@ -70,6 +71,10 @@ pub enum HookError {
     /// created. The inner string carries the context.
     #[error("CGEventTap setup failed: {0}")]
     MacOsTap(String),
+    /// `SetWindowsHookEx` failed, or the hook thread could not be started. The
+    /// inner string carries the context (including `GetLastError`).
+    #[error("Windows mouse hook setup failed: {0}")]
+    WindowsHook(String),
 }
 
 /// A running OS-level mouse hook. Call [`Hook::stop`] to tear down.
@@ -81,9 +86,11 @@ pub enum HookError {
 pub struct Hook {
     #[cfg(target_os = "macos")]
     inner: Option<macos::HookInner>,
-    /// Makes `Hook` uninhabited on non-macOS targets, so [`Hook::start`] can
+    #[cfg(target_os = "windows")]
+    inner: Option<windows::HookInner>,
+    /// Makes `Hook` uninhabited on unsupported targets, so [`Hook::start`] can
     /// only ever return `Err` there and the type can never be constructed.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     never: std::convert::Infallible,
 }
 
@@ -93,7 +100,11 @@ impl Drop for Hook {
         if let Some(inner) = self.inner.take() {
             macos::stop(inner);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        if let Some(inner) = self.inner.take() {
+            windows::stop(inner);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         // Unreachable: `never: Infallible` makes `Hook` uninhabited here.
         {}
     }
@@ -108,8 +119,9 @@ impl Hook {
     /// system-wide.
     ///
     /// On macOS, returns [`HookError::AccessibilityDenied`] when the process
-    /// has not been granted Accessibility permission. On Linux and Windows,
-    /// returns [`HookError::Unsupported`].
+    /// has not been granted Accessibility permission. On Windows, returns
+    /// [`HookError::WindowsHook`] when the low-level hook can't be installed. On
+    /// Linux, returns [`HookError::Unsupported`].
     pub fn start(
         cb: impl Fn(MouseEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
@@ -117,7 +129,11 @@ impl Hook {
         {
             macos::start(cb).map(|inner| Self { inner: Some(inner) })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            windows::start(cb).map(|inner| Self { inner: Some(inner) })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = cb;
             Err(HookError::Unsupported)
@@ -130,10 +146,10 @@ impl Hook {
     /// joins. Calling this explicitly is preferred over relying on `Drop` when
     /// errors in cleanup should be visible. `Drop` calls this automatically.
     #[cfg_attr(
-        not(target_os = "macos"),
+        not(any(target_os = "macos", target_os = "windows")),
         allow(
             unused_mut,
-            reason = "`mut self` is only consumed by the macOS teardown path"
+            reason = "`mut self` is only consumed by the macOS/Windows teardown paths"
         )
     )]
     pub fn stop(mut self) {
@@ -141,7 +157,11 @@ impl Hook {
         if let Some(inner) = self.inner.take() {
             macos::stop(inner);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        if let Some(inner) = self.inner.take() {
+            windows::stop(inner);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         match self.never {}
     }
 
@@ -176,22 +196,34 @@ impl Hook {
         {
             macos::prompt_accessibility();
         }
+        #[cfg(target_os = "windows")]
+        {
+            windows::prompt_accessibility();
+        }
     }
 }
 
-/// Return the macOS bundle identifier of the currently frontmost application,
-/// e.g. `"com.microsoft.VSCode"`. `None` when no app is frontmost, when
-/// reading the value fails, or on any non-macOS platform (P1.4).
+/// Return an identifier for the currently frontmost application: on macOS the
+/// bundle identifier (e.g. `"com.microsoft.VSCode"`); on Windows the foreground
+/// process's executable file name, lower-cased (e.g. `"code.exe"`). `None` when
+/// no app is frontmost, when reading the value fails, or on Linux (P1.4).
 ///
-/// Costs four `objc_msgSend`s plus a UTF-8 copy — well under a millisecond
-/// at the 1 Hz polling cadence in `openlogi-gui::app_watcher`.
+/// Used by the per-application profile watcher to auto-switch bindings on focus
+/// change; the config stores whichever identifier form the host platform yields.
+///
+/// On macOS this costs four `objc_msgSend`s plus a UTF-8 copy — well under a
+/// millisecond at the 1 Hz polling cadence in `openlogi-gui::app_watcher`.
 #[must_use]
 pub fn frontmost_bundle_id() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         macos::frontmost_bundle_id()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::frontmost_process_name()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         None
     }
@@ -199,6 +231,9 @@ pub fn frontmost_bundle_id() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod macos;
+
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(test)]
 mod tests;

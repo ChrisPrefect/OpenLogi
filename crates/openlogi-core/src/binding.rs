@@ -585,12 +585,86 @@ impl Action {
         #[cfg(target_os = "macos")]
         self.execute_macos();
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        self.execute_windows();
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             tracing::warn!(
                 action = self.label(),
                 "Action::execute unsupported on this platform"
             );
+        }
+    }
+
+    /// Windows implementation: synthesise the OS event via `SendInput`.
+    ///
+    /// Keyboard shortcuts use Windows virtual-key codes; mouse clicks and scroll
+    /// ticks use mouse input. A few macOS-only WindowServer actions map to their
+    /// closest Windows shell equivalent (documented inline). Device-side actions
+    /// (`CycleDpiPresets`, `SetDpiPreset`, `ToggleSmartShift`) have no input
+    /// equivalent and are handled at the hook/HID layer, logging a trace here.
+    #[cfg(target_os = "windows")]
+    fn execute_windows(&self) {
+        use windows::vk;
+
+        match self {
+            // ── Mouse clicks ──────────────────────────────────────────────────
+            Action::LeftClick => windows::left_click(),
+            Action::RightClick => windows::right_click(),
+            Action::MiddleClick => windows::middle_click(),
+            // ── Editing (Ctrl is the primary modifier on Windows) ─────────────
+            Action::Copy => windows::chord(&[vk::CONTROL], vk::C),
+            Action::Paste => windows::chord(&[vk::CONTROL], vk::V),
+            Action::Cut => windows::chord(&[vk::CONTROL], vk::X),
+            Action::Undo => windows::chord(&[vk::CONTROL], vk::Z),
+            Action::Redo => windows::chord(&[vk::CONTROL], vk::Y),
+            Action::SelectAll => windows::chord(&[vk::CONTROL], vk::A),
+            Action::Find => windows::chord(&[vk::CONTROL], vk::F),
+            Action::Save => windows::chord(&[vk::CONTROL], vk::S),
+            // ── Browser / Navigation ──────────────────────────────────────────
+            // Dedicated browser keys; the hook layer also handles the physical
+            // side buttons directly.
+            Action::BrowserBack => windows::tap(vk::BROWSER_BACK),
+            Action::BrowserForward => windows::tap(vk::BROWSER_FORWARD),
+            Action::NewTab => windows::chord(&[vk::CONTROL], vk::T),
+            Action::CloseTab => windows::chord(&[vk::CONTROL], vk::W),
+            Action::ReopenTab => windows::chord(&[vk::CONTROL, vk::SHIFT], vk::T),
+            Action::NextTab => windows::chord(&[vk::CONTROL], vk::TAB),
+            Action::PrevTab => windows::chord(&[vk::CONTROL, vk::SHIFT], vk::TAB),
+            Action::ReloadPage => windows::chord(&[vk::CONTROL], vk::R),
+            // ── Navigation / Window: closest Windows shell equivalents ────────
+            // macOS Mission Control / App Exposé both map to Task View (Win+Tab);
+            // Windows has no separate "current-app windows" gesture.
+            Action::MissionControl | Action::AppExpose => windows::chord(&[vk::LWIN], vk::TAB),
+            Action::ShowDesktop => windows::chord(&[vk::LWIN], vk::D),
+            // Launchpad ≈ the Start menu (app launcher): tap the Windows key.
+            Action::LaunchpadShow => windows::tap(vk::LWIN),
+            // ── System ────────────────────────────────────────────────────────
+            Action::LockScreen => windows::chord(&[vk::LWIN], vk::L),
+            // Win+Shift+S opens the Snip & Sketch region capture.
+            Action::Screenshot => windows::chord(&[vk::LWIN, vk::SHIFT], vk::S),
+            // ── Media ─────────────────────────────────────────────────────────
+            Action::PlayPause => windows::tap(vk::MEDIA_PLAY_PAUSE),
+            Action::NextTrack => windows::tap(vk::MEDIA_NEXT_TRACK),
+            Action::PrevTrack => windows::tap(vk::MEDIA_PREV_TRACK),
+            Action::VolumeUp => windows::tap(vk::VOLUME_UP),
+            Action::VolumeDown => windows::tap(vk::VOLUME_DOWN),
+            Action::MuteVolume => windows::tap(vk::VOLUME_MUTE),
+            // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
+            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+                tracing::debug!(
+                    action = self.label(),
+                    "device action handled by hook/HID layer"
+                );
+            }
+            // ── Scroll ────────────────────────────────────────────────────────
+            Action::ScrollUp => windows::scroll_vertical(1),
+            Action::ScrollDown => windows::scroll_vertical(-1),
+            Action::HorizontalScrollLeft => windows::scroll_horizontal(-1),
+            Action::HorizontalScrollRight => windows::scroll_horizontal(1),
+            // ── Custom recorded chord ─────────────────────────────────────────
+            Action::CustomShortcut(combo) => windows::custom_shortcut(combo),
         }
     }
 
@@ -715,7 +789,10 @@ pub fn post_horizontal_scroll(delta: i32) {
     #[cfg(target_os = "macos")]
     macos::post_horizontal_scroll(delta);
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    windows::post_horizontal_scroll(delta);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = delta;
 }
 
@@ -951,6 +1028,265 @@ mod macos {
             fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
             fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         }
+    }
+}
+
+/// Platform helpers for synthesising OS-level input events on Windows via the
+/// `SendInput` API. Mirrors the shape of the macOS [`macos`] helper module.
+#[cfg(target_os = "windows")]
+#[allow(
+    unsafe_code,
+    reason = "SendInput is a raw Win32 FFI call; isolated to this module"
+)]
+mod windows {
+    #![allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
+
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    };
+
+    use super::KeyCombo;
+
+    /// One wheel notch in `mouseData` units (`WHEEL_DELTA`).
+    const WHEEL_DELTA: i32 = 120;
+
+    /// Windows virtual-key codes used by the action catalog. Letters and digits
+    /// are their ASCII codes; the rest are the documented `VK_*` constants.
+    pub(super) mod vk {
+        pub(in crate::binding) const CONTROL: u16 = 0x11;
+        pub(in crate::binding) const SHIFT: u16 = 0x10;
+        pub(in crate::binding) const MENU: u16 = 0x12; // Alt
+        pub(in crate::binding) const LWIN: u16 = 0x5B;
+        pub(in crate::binding) const TAB: u16 = 0x09;
+
+        pub(in crate::binding) const A: u16 = 0x41;
+        pub(in crate::binding) const C: u16 = 0x43;
+        pub(in crate::binding) const D: u16 = 0x44;
+        pub(in crate::binding) const F: u16 = 0x46;
+        pub(in crate::binding) const L: u16 = 0x4C;
+        pub(in crate::binding) const R: u16 = 0x52;
+        pub(in crate::binding) const S: u16 = 0x53;
+        pub(in crate::binding) const T: u16 = 0x54;
+        pub(in crate::binding) const V: u16 = 0x56;
+        pub(in crate::binding) const W: u16 = 0x57;
+        pub(in crate::binding) const X: u16 = 0x58;
+        pub(in crate::binding) const Y: u16 = 0x59;
+        pub(in crate::binding) const Z: u16 = 0x5A;
+
+        pub(in crate::binding) const BROWSER_BACK: u16 = 0xA6;
+        pub(in crate::binding) const BROWSER_FORWARD: u16 = 0xA7;
+        pub(in crate::binding) const VOLUME_MUTE: u16 = 0xAD;
+        pub(in crate::binding) const VOLUME_DOWN: u16 = 0xAE;
+        pub(in crate::binding) const VOLUME_UP: u16 = 0xAF;
+        pub(in crate::binding) const MEDIA_NEXT_TRACK: u16 = 0xB0;
+        pub(in crate::binding) const MEDIA_PREV_TRACK: u16 = 0xB1;
+        pub(in crate::binding) const MEDIA_PLAY_PAUSE: u16 = 0xB3;
+    }
+
+    /// Keys that must carry `KEYEVENTF_EXTENDEDKEY` so the OS routes them
+    /// correctly (the Windows key and the multimedia / browser keys).
+    fn is_extended(key: u16) -> bool {
+        matches!(
+            key,
+            vk::LWIN
+                | vk::BROWSER_BACK
+                | vk::BROWSER_FORWARD
+                | vk::VOLUME_MUTE
+                | vk::VOLUME_DOWN
+                | vk::VOLUME_UP
+                | vk::MEDIA_NEXT_TRACK
+                | vk::MEDIA_PREV_TRACK
+                | vk::MEDIA_PLAY_PAUSE
+        )
+    }
+
+    /// Build a keyboard `INPUT` for `key`, as a press (`up == false`) or
+    /// release (`up == true`).
+    fn key_input(key: u16, up: bool) -> INPUT {
+        let mut flags = 0u32;
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        if is_extended(key) {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: key,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    /// Build a mouse `INPUT` carrying `flags` and `mouse_data` (used for the
+    /// wheel amount / which X button; zero for plain clicks).
+    fn mouse_input(flags: u32, mouse_data: i32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: mouse_data as u32,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
+    /// Inject a batch of synthetic input events in order.
+    fn send(inputs: &[INPUT]) {
+        if inputs.is_empty() {
+            return;
+        }
+        // SAFETY: `inputs` is a valid, non-empty slice of `INPUT`; we pass its
+        // length and the exact `size_of::<INPUT>()` Windows expects.
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                core::mem::size_of::<INPUT>() as i32,
+            )
+        };
+        if sent as usize != inputs.len() {
+            tracing::warn!(
+                sent,
+                expected = inputs.len(),
+                "SendInput injected fewer events than requested"
+            );
+        }
+    }
+
+    /// Press `modifiers` (in order), tap `key`, then release `modifiers` (in
+    /// reverse) — a standard keyboard shortcut.
+    pub(in crate::binding) fn chord(modifiers: &[u16], key: u16) {
+        let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+        for &m in modifiers {
+            inputs.push(key_input(m, false));
+        }
+        inputs.push(key_input(key, false));
+        inputs.push(key_input(key, true));
+        for &m in modifiers.iter().rev() {
+            inputs.push(key_input(m, true));
+        }
+        send(&inputs);
+    }
+
+    /// Tap a single key (press + release) with no modifiers.
+    pub(in crate::binding) fn tap(key: u16) {
+        chord(&[], key);
+    }
+
+    pub(in crate::binding) fn left_click() {
+        send(&[
+            mouse_input(MOUSEEVENTF_LEFTDOWN, 0),
+            mouse_input(MOUSEEVENTF_LEFTUP, 0),
+        ]);
+    }
+
+    pub(in crate::binding) fn right_click() {
+        send(&[
+            mouse_input(MOUSEEVENTF_RIGHTDOWN, 0),
+            mouse_input(MOUSEEVENTF_RIGHTUP, 0),
+        ]);
+    }
+
+    pub(in crate::binding) fn middle_click() {
+        send(&[
+            mouse_input(MOUSEEVENTF_MIDDLEDOWN, 0),
+            mouse_input(MOUSEEVENTF_MIDDLEUP, 0),
+        ]);
+    }
+
+    /// Scroll `notches` vertically (positive = up, negative = down).
+    pub(in crate::binding) fn scroll_vertical(notches: i32) {
+        send(&[mouse_input(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA)]);
+    }
+
+    /// Scroll `notches` horizontally (positive = right, negative = left).
+    pub(in crate::binding) fn scroll_horizontal(notches: i32) {
+        send(&[mouse_input(MOUSEEVENTF_HWHEEL, notches * WHEEL_DELTA)]);
+    }
+
+    /// Re-inject a horizontal wheel scroll for the diverted MX thumb wheel.
+    /// `delta` is the device's raw rotation (sign follows the wheel).
+    pub(in crate::binding) fn post_horizontal_scroll(delta: i32) {
+        send(&[mouse_input(MOUSEEVENTF_HWHEEL, delta * WHEEL_DELTA)]);
+    }
+
+    /// Translate a recorded macOS virtual key (`kVK_*`) to its Windows VK.
+    /// Covers the ANSI letters the recorder UI captures; returns `None` for keys
+    /// without a known mapping (the chord is then skipped with a warning).
+    fn mac_vk_to_win(mac: u16) -> Option<u16> {
+        Some(match mac {
+            0x00 => vk::A,
+            0x01 => vk::S,
+            0x02 => vk::D,
+            0x03 => vk::F,
+            0x06 => vk::Z,
+            0x07 => vk::X,
+            0x08 => vk::C,
+            0x09 => vk::V,
+            0x0B => 0x42, // B
+            0x0C => 0x51, // Q
+            0x0D => vk::W,
+            0x0E => 0x45, // E
+            0x0F => vk::R,
+            0x10 => vk::Y,
+            0x11 => vk::T,
+            0x20 => 0x55, // U
+            0x22 => 0x49, // I
+            0x1F => 0x4F, // O
+            0x23 => 0x50, // P
+            _ => return None,
+        })
+    }
+
+    /// Replay a recorded custom shortcut. Modifiers map macOS → Windows
+    /// (Command and Control both become Ctrl; Option becomes Alt).
+    pub(in crate::binding) fn custom_shortcut(combo: &KeyCombo) {
+        if combo.key_code == 0 {
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                "CustomShortcut with no key code — press ignored"
+            );
+            return;
+        }
+        let Some(key) = mac_vk_to_win(combo.key_code) else {
+            tracing::warn!(
+                chord = %combo.rendered_label(),
+                key_code = combo.key_code,
+                "CustomShortcut key has no Windows mapping — press ignored"
+            );
+            return;
+        };
+
+        let mut modifiers: Vec<u16> = Vec::new();
+        if combo.modifiers & (KeyCombo::MOD_CMD | KeyCombo::MOD_CTRL) != 0 {
+            modifiers.push(vk::CONTROL);
+        }
+        if combo.modifiers & KeyCombo::MOD_SHIFT != 0 {
+            modifiers.push(vk::SHIFT);
+        }
+        if combo.modifiers & KeyCombo::MOD_OPTION != 0 {
+            modifiers.push(vk::MENU);
+        }
+        chord(&modifiers, key);
     }
 }
 
