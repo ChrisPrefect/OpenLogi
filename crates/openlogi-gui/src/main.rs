@@ -32,6 +32,7 @@ mod app_assets;
 mod app_menu;
 mod asset;
 mod components;
+mod control;
 mod data;
 mod hardware;
 mod hook_runtime;
@@ -75,7 +76,21 @@ fn main() -> Result<()> {
 
     // Headless self-update from GitHub: `OpenLogi.exe --update`.
     if std::env::args().any(|a| a == "--update") {
+        // Release builds are a GUI-subsystem app with no console, so reattach
+        // to the launching `cmd`'s console first or the output goes nowhere.
+        #[cfg(target_os = "windows")]
+        attach_parent_console();
         std::process::exit(platform::updater::run_cli_update());
+    }
+
+    // Out-of-process DPI control, e.g. from a `.cmd`: `OpenLogi.exe --set-dpi
+    // 1600`. Routes to the running instance over the loopback control channel,
+    // or opens the device directly when nothing is running. Runs before the
+    // single-instance check — this is a client, not a second app instance.
+    if let Some(raw) = set_dpi_arg() {
+        #[cfg(target_os = "windows")]
+        attach_parent_console();
+        std::process::exit(control::run_set_dpi_cli(&raw));
     }
 
     let _guard = match platform::single_instance::acquire() {
@@ -132,6 +147,16 @@ fn main() -> Result<()> {
     let (flash_tx, mut flash_rx) =
         tokio::sync::mpsc::unbounded_channel::<openlogi_core::binding::ButtonId>();
     hook_runtime::set_flash_sink(flash_tx);
+
+    // Loopback control channel for `OpenLogi.exe --set-dpi <N>` (e.g. from a
+    // `.cmd`). The server writes DPI on the capture session's open channel and
+    // pushes the applied value back here so the slider label stays in sync.
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+    control::serve(
+        Arc::clone(&capture_channel),
+        Arc::clone(&dpi_cycle),
+        control_tx,
+    );
 
     // Tray click events (Open / Quit), drained by a dedicated task below.
     // macOS status item + Windows notification-area icon; no tray on Linux.
@@ -333,6 +358,16 @@ fn main() -> Result<()> {
                         });
                         flash_clear = None;
                     }
+                    // The control channel applied a DPI change out of process —
+                    // mirror it into the slider label so the UI doesn't drift.
+                    Some(dpi) = control_rx.recv() => {
+                        cx.update(|cx| {
+                            if cx.has_global::<AppState>() {
+                                cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
+                            }
+                            cx.refresh_windows();
+                        });
+                    }
                     else => break,
                 }
             }
@@ -359,6 +394,40 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+/// Reattach this (GUI-subsystem) process to the console of the launching
+/// process — the `cmd`/PowerShell window that ran `OpenLogi.exe --set-dpi …`.
+/// Without it, a `windows_subsystem = "windows"` build has no console, so
+/// `println!` / `eprintln!` from the CLI flags vanish. Best-effort: if there's
+/// no parent console (launched from Explorer), the call just fails and we run
+/// silently, which is fine.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "AttachConsole is raw Win32 FFI")]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: AttachConsole takes a process id; ATTACH_PARENT_PROCESS is the
+    // documented sentinel for "the parent's console". No pointers involved.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+/// The raw value passed to `--set-dpi`, if present. Accepts both `--set-dpi
+/// 1600` and `--set-dpi=1600`. Returns the raw string (validated downstream) so
+/// a malformed value still produces a clear error instead of silently launching
+/// the GUI.
+fn set_dpi_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--set-dpi=") {
+            return Some(value.to_string());
+        }
+        if arg == "--set-dpi" {
+            return Some(args.next().unwrap_or_default());
+        }
+    }
+    None
 }
 
 fn reconcile_early_config() {

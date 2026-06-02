@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "openlogi-cli",
@@ -4378,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-assets"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-cli"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-core"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
@@ -4418,7 +4418,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-gui"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "cocoa 0.26.0",
@@ -4449,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hid"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "async-hid",
  "futures-lite 2.6.1",
@@ -4462,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "openlogi-hook"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "cocoa 0.26.0",
  "core-foundation 0.10.0",
@@ -8450,7 +8450,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.3.2"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
