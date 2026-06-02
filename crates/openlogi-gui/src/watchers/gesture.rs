@@ -136,6 +136,9 @@ fn dispatch(
 ) {
     match input {
         CapturedInput::Gesture(direction) => {
+            // Flash the gesture button on the diagram for every captured press,
+            // bound or not, so the UI doubles as a detection indicator.
+            hook_runtime::flash_button(ButtonId::GestureButton);
             let action = gesture_bindings
                 .read()
                 .ok()
@@ -148,6 +151,7 @@ fn dispatch(
             }
         }
         CapturedInput::ButtonPressed(button) => {
+            hook_runtime::flash_button(button);
             let action = button_bindings
                 .read()
                 .ok()

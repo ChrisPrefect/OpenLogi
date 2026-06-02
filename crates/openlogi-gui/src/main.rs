@@ -116,6 +116,13 @@ fn main() -> Result<()> {
         watchers::accessibility::spawn(std::time::Duration::from_millis(1200));
     let (pairing_ctrl_tx, mut pairing_evt_rx) = watchers::pairing::spawn();
 
+    // Button-press notifications from the OS hook and the HID++ gesture watcher,
+    // drained in the loop below to briefly flash the pressed button on the mouse
+    // diagram (a live detection indicator).
+    let (flash_tx, mut flash_rx) =
+        tokio::sync::mpsc::unbounded_channel::<openlogi_core::binding::ButtonId>();
+    hook_runtime::set_flash_sink(flash_tx);
+
     // Tray click events (Open / Quit), drained by a dedicated task below.
     // macOS status item + Windows notification-area icon; no tray on Linux.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -226,6 +233,8 @@ fn main() -> Result<()> {
             });
 
             let mut hook_handle = None;
+            // Deadline at which the current button flash should clear, if any.
+            let mut flash_clear: Option<tokio::time::Instant> = None;
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
@@ -270,6 +279,42 @@ fn main() -> Result<()> {
                         cx.update(|cx| {
                             windows::add_device::apply_event(cx, event);
                         });
+                    }
+                    // A button was pressed: flash it on the diagram. Only while a
+                    // window is open — there's nothing to show in tray-only mode,
+                    // and touching views after the window closed just logs errors.
+                    Some(button) = flash_rx.recv() => {
+                        let shown = cx.update(|cx| {
+                            if cx.windows().is_empty() || !cx.has_global::<AppState>() {
+                                return false;
+                            }
+                            cx.update_global::<AppState, _>(|state, _| {
+                                state.active_button = Some(button);
+                            });
+                            true
+                        });
+                        if shown {
+                            flash_clear = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(450),
+                            );
+                        }
+                    }
+                    // The flash has lived long enough — clear the highlight.
+                    () = async {
+                        match flash_clear {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        cx.update(|cx| {
+                            if cx.has_global::<AppState>() {
+                                cx.update_global::<AppState, _>(|state, _| {
+                                    state.active_button = None;
+                                });
+                            }
+                        });
+                        flash_clear = None;
                     }
                     else => break,
                 }

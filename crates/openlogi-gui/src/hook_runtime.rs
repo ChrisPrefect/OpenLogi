@@ -6,11 +6,12 @@
 //! installation, and action dispatch for both hook and gesture events.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
@@ -18,6 +19,24 @@ use crate::state::DpiCycleState;
 
 /// Shared binding map threaded between `AppState` and the hook callback.
 pub type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
+
+/// Sink for "a button was pressed" notifications, drained by the GPUI loop in
+/// `main.rs` to briefly highlight the button on the mouse diagram. Set once at
+/// startup; both the OS hook and the HID++ gesture watcher publish to it.
+static FLASH_SINK: OnceLock<UnboundedSender<ButtonId>> = OnceLock::new();
+
+/// Register the UI flash sink. Call once before the hook / gesture watcher run.
+pub fn set_flash_sink(tx: UnboundedSender<ButtonId>) {
+    let _ = FLASH_SINK.set(tx);
+}
+
+/// Notify the UI that `button` was just pressed, so it can flash on the diagram.
+/// No-op until [`set_flash_sink`] has run, and silently drops if the UI is gone.
+pub fn flash_button(button: ButtonId) {
+    if let Some(tx) = FLASH_SINK.get() {
+        let _ = tx.send(button);
+    }
+}
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
@@ -46,6 +65,12 @@ pub fn start(
                 ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
             ) {
                 return EventDisposition::PassThrough;
+            }
+
+            // Flash the button on the diagram for every press the hook sees —
+            // even unbound ones — so the UI doubles as a detection indicator.
+            if pressed {
+                flash_button(id);
             }
 
             let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
