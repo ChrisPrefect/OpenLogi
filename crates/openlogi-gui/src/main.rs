@@ -234,7 +234,10 @@ fn main() -> Result<()> {
 
             let mut hook_handle = None;
             // Deadline at which the current button flash should clear, if any.
-            let mut flash_clear: Option<tokio::time::Instant> = None;
+            // Driven by GPUI's timer: this loop runs on GPUI's executor, which
+            // has no Tokio runtime, so a Tokio timer here would panic at runtime.
+            let mut flash_clear: Option<std::time::Instant> = None;
+            let flash_timer = cx.background_executor().clone();
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
@@ -295,7 +298,7 @@ fn main() -> Result<()> {
                         });
                         if shown {
                             flash_clear = Some(
-                                tokio::time::Instant::now()
+                                std::time::Instant::now()
                                     + std::time::Duration::from_millis(450),
                             );
                         }
@@ -303,7 +306,11 @@ fn main() -> Result<()> {
                     // The flash has lived long enough — clear the highlight.
                     () = async {
                         match flash_clear {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            Some(deadline) => {
+                                let remaining = deadline
+                                    .saturating_duration_since(std::time::Instant::now());
+                                flash_timer.timer(remaining).await;
+                            }
                             None => std::future::pending::<()>().await,
                         }
                     } => {
