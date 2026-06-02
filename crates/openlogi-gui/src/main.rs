@@ -4,6 +4,11 @@
 //! the main thread, so we can't move it onto a tokio runtime). Live polling
 //! lands when there's something to react to.
 
+// Release builds are a GUI subsystem app: no console window pops up on launch
+// (including the `--minimized` autostart). Debug builds keep the console so logs
+// stream to the terminal. Logs always also go to a file (see `init_tracing`).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 /// Translate `key` (an English msgid) to the current locale and wrap it as a
 /// [`gpui::SharedString`], ready for `.child(...)` / `.label(...)` / menu items.
 /// Forwards `rust_i18n` interpolation, e.g. `tr!("Bind %{name}", name => x)`.
@@ -67,6 +72,11 @@ use crate::state::{AppState, DpiCycleState};
 )]
 fn main() -> Result<()> {
     init_tracing();
+
+    // Headless self-update from GitHub: `OpenLogi.exe --update`.
+    if std::env::args().any(|a| a == "--update") {
+        std::process::exit(platform::updater::run_cli_update());
+    }
 
     let _guard = match platform::single_instance::acquire() {
         Ok(g) => g,
@@ -384,15 +394,53 @@ fn main_window_options(cx: &mut gpui::App) -> WindowOptions {
     }
 }
 
+/// Get the raw Win32 `HWND` backing a GPUI window, for the tray show/hide FFI.
+#[cfg(target_os = "windows")]
+fn window_hwnd(window: &gpui::Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    }
+}
+
+/// Hide the main window to the tray (instead of closing → quitting the app).
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "ShowWindow is raw Win32 FFI")]
+fn hide_window(window: &gpui::Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    if let Some(hwnd) = window_hwnd(window) {
+        // SAFETY: `hwnd` is our live window handle; hiding it is always safe.
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+}
+
+/// Re-show a window previously hidden to the tray.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code, reason = "ShowWindow is raw Win32 FFI")]
+fn show_window(window: &gpui::Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOW, ShowWindow};
+    if let Some(hwnd) = window_hwnd(window) {
+        // SAFETY: `hwnd` is our live window handle; showing it is always safe.
+        unsafe { ShowWindow(hwnd, SW_SHOW) };
+    }
+}
+
 /// Open the main window — or focus the one already open. The handle is parked
 /// in [`windows::WindowRegistry`] so the dock-icon reopen handler (and any
 /// repeat call) re-focuses the live window instead of stacking a duplicate, and
-/// a window closed while the app kept running can be brought back.
+/// a window closed (Windows: hidden) while the app kept running can be brought
+/// back.
 fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     let existing = cx.default_global::<windows::WindowRegistry>().main;
     if let Some(handle) = existing {
         if handle
-            .update(cx, |_, window, _| window.activate_window())
+            .update(cx, |_, window, _| {
+                // The window may have been hidden to the tray on close; reveal it.
+                #[cfg(target_os = "windows")]
+                show_window(window);
+                window.activate_window();
+            })
             .is_ok()
         {
             cx.activate(true);
@@ -405,6 +453,15 @@ fn open_main_window(inventories: &[DeviceInventory], cx: &mut gpui::App) {
     let options = main_window_options(cx);
     let opened = cx.open_window(options, |window, cx| {
         Theme::change(ThemeMode::from(window.appearance()), Some(window), cx);
+
+        // On Windows, intercept the window's close button: hide to the tray and
+        // keep the app (and its hook) alive. Quitting is only via the tray menu.
+        // macOS keeps its own close→menu-bar behavior, so this is Windows-only.
+        #[cfg(target_os = "windows")]
+        window.on_window_should_close(cx, |window, _cx| {
+            hide_window(window);
+            false
+        });
 
         let view = cx.new(|cx| AppView::new(inventories, cx));
 
@@ -475,11 +532,30 @@ fn load_config_and_bindings(
 }
 
 fn init_tracing() {
+    use tracing_subscriber::fmt::writer::MakeWriterExt as _;
+
+    let filter =
+        EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Release builds have no console (windows_subsystem = "windows"), so logs
+    // also go to a file in the data dir. Truncated each launch so it only ever
+    // holds the current session — handy for "it's misbehaving right now".
+    if let Ok(dir) = openlogi_core::paths::data_dir()
+        && std::fs::create_dir_all(&dir).is_ok()
+    {
+        let _ = std::fs::remove_file(dir.join("openlogi.log"));
+        let file = tracing_appender::rolling::never(&dir, "openlogi.log");
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(file.and(std::io::stderr))
+            .with_env_filter(filter)
+            .init();
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(filter)
         .init();
 }
 

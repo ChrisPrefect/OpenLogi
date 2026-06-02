@@ -14,8 +14,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
-use gpui_updater::Updater;
-
+use crate::platform::updater::Updater;
 use crate::state::AppState;
 use crate::theme;
 use crate::windows::{self, AuxWindow};

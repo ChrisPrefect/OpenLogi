@@ -28,12 +28,18 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
+# Same major as gpui's, so the RawWindowHandle types unify — used to hide the
+# window to the tray on close (Windows) instead of quitting.
+raw-window-handle = "0.6"
 fs4 = { version = "1.1.0", features = ["sync"] }
 thiserror.workspace = true
 ureq.workspace = true
+serde_json.workspace = true
+# Atomically replace the running executable for in-place GitHub self-update.
+self-replace = "1"
 rust-i18n = "4"
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.3", features = ["gpui"] }
 
 # Menu-bar (NSStatusItem) FFI — GPUI has no status-bar API. Same crates the
 # openlogi-hook CGEventTap uses, so the toolchain is already proven here.

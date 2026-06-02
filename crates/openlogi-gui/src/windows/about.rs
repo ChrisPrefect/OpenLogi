@@ -10,16 +10,17 @@ use gpui::{
     Size, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, img, px,
 };
 use gpui_component::{IconName, button::Button, h_flex, v_flex};
-use gpui_updater::{UpdateStatus, Updater};
+
+use crate::platform::updater::{UpdateStatus, Updater};
 
 use crate::theme;
 use crate::windows::{self, AuxWindow};
 
-const REPO_URL: &str = "https://github.com/AprilNEA/OpenLogi";
-const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/latest";
+const REPO_URL: &str = "https://github.com/ChrisPrefect/OpenLogi";
+const RELEASES_URL: &str = "https://github.com/ChrisPrefect/OpenLogi/releases/latest";
 /// Release page for this exact build, opened by clicking the version label.
 const RELEASE_TAG_URL: &str = concat!(
-    "https://github.com/AprilNEA/OpenLogi/releases/tag/v",
+    "https://github.com/ChrisPrefect/OpenLogi/releases/tag/v",
     env!("CARGO_PKG_VERSION")
 );
 
@@ -87,11 +88,7 @@ impl AboutView {
             UpdateStatus::Checking => Some("Checking for updates…".to_string()),
             UpdateStatus::UpToDate => Some("You're on the latest version.".to_string()),
             UpdateStatus::Available(v) => Some(format!("Version {v} is available.")),
-            UpdateStatus::Downloading { downloaded, total } => Some(match total {
-                Some(t) if *t > 0 => format!("Downloading… {}%", *downloaded * 100 / *t),
-                _ => format!("Downloading… {} MB", *downloaded / 1_048_576),
-            }),
-            UpdateStatus::Installing => Some("Installing…".to_string()),
+            UpdateStatus::Installing => Some("Downloading & installing…".to_string()),
             UpdateStatus::Staged(v) => Some(format!("Version {v} is ready.")),
             UpdateStatus::Errored(e) => Some(format!("Update failed: {e}")),
         };
