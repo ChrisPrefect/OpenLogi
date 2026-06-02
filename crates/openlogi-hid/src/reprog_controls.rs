@@ -38,6 +38,19 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Control ID of the mouse "Back" side button (HID++ `0x1b04`). Mapped to
+/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back).
+pub const BACK_CID: u16 = 0x0053;
+
+/// Control ID of the mouse "Forward" side button (HID++ `0x1b04`). Mapped to
+/// [`ButtonId::Forward`](openlogi_core::binding::ButtonId::Forward).
+///
+/// On devices like the MX Anywhere 3S the side buttons are not delivered as
+/// standard `XBUTTON` mouse events on Windows (an OS-level mouse hook never sees
+/// them), so OpenLogi diverts them over HID++ — the same path as the DPI button
+/// — and dispatches the bound action itself.
+pub const FORWARD_CID: u16 = 0x0056;
+
 /// `getCount` function ID.
 const FN_GET_COUNT: u8 = 0;
 /// `getCtrlIdInfo` function ID.

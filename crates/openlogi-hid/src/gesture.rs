@@ -87,6 +87,9 @@ struct CaptureAccum {
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
+    /// Nav (Back/Forward) CIDs held in the last event — for per-button
+    /// rising-edge press detection.
+    nav_held: Vec<u16>,
 }
 
 /// Capture the gesture button, DPI/ModeShift button, and (when
@@ -120,6 +123,7 @@ pub async fn run_capture_session(
     let reprog_index = armed.reprog.as_ref().map(|(_, idx)| *idx);
     let thumb_index = armed.thumb.as_ref().map(|(_, idx)| *idx);
     let dpi_set = armed.dpi_cids.clone();
+    let nav_set = armed.nav_cids.clone();
     let hdl = chan.add_msg_listener({
         let accum = Arc::clone(&accum);
         let sink = sink.clone();
@@ -133,7 +137,7 @@ pub async fn run_capture_session(
                     // Recover the guard even if a prior holder panicked — the
                     // critical section is panic-free, so the data is consistent.
                     let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                    handle_reprog(&mut acc, event, &dpi_set, &sink);
+                    handle_reprog(&mut acc, event, &dpi_set, &nav_set, &sink);
                     return;
                 }
             }
@@ -154,6 +158,7 @@ pub async fn run_capture_session(
         index = device_index,
         gesture = armed.gesture_diverted,
         dpi_buttons = armed.dpi_cids.len(),
+        nav_buttons = armed.nav_cids.len(),
         thumbwheel = armed.thumb.is_some(),
         "control capture active"
     );
@@ -177,6 +182,8 @@ struct ArmedControls {
     gesture_diverted: bool,
     /// DPI/ModeShift CIDs diverted as plain buttons.
     dpi_cids: Vec<u16>,
+    /// Back/Forward CIDs diverted as plain buttons, with their logical id.
+    nav_cids: Vec<(u16, ButtonId)>,
     /// `0x2150` accessor + feature index, present when the thumb wheel is
     /// diverted.
     thumb: Option<(Thumbwheel, u8)>,
@@ -194,6 +201,12 @@ impl ArmedControls {
             }
             for &cid in &self.dpi_cids {
                 restore(rc.set_cid_reporting(cid, false, false).await, "DPI button");
+            }
+            for &(cid, _) in &self.nav_cids {
+                restore(
+                    rc.set_cid_reporting(cid, false, false).await,
+                    "nav button",
+                );
             }
         }
         if let Some((tw, _)) = self.thumb.as_ref() {
@@ -219,6 +232,7 @@ async fn arm_controls(
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
     let mut gesture_diverted = false;
     let mut dpi_cids: Vec<u16> = Vec::new();
+    let mut nav_cids: Vec<(u16, ButtonId)> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -243,6 +257,20 @@ async fn arm_controls(
                     .await
                     .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
                 dpi_cids.push(cid);
+            }
+        }
+        // Back / Forward side buttons: on devices that don't deliver them as
+        // standard mouse events (e.g. the MX Anywhere 3S on Windows), divert
+        // them over HID++ so OpenLogi can dispatch their bound action.
+        for &(cid, button) in &[
+            (reprog_controls::BACK_CID, ButtonId::Back),
+            (reprog_controls::FORWARD_CID, ButtonId::Forward),
+        ] {
+            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
+                rc.set_cid_reporting(cid, true, false)
+                    .await
+                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                nav_cids.push((cid, button));
             }
         }
         reprog = Some((rc, info.index));
@@ -278,13 +306,14 @@ async fn arm_controls(
         }
     }
 
-    if !gesture_diverted && dpi_cids.is_empty() && thumb.is_none() {
+    if !gesture_diverted && dpi_cids.is_empty() && nav_cids.is_empty() && thumb.is_none() {
         debug!(slot, "no capturable controls — idle session");
     }
     Ok(ArmedControls {
         reprog,
         gesture_diverted,
         dpi_cids,
+        nav_cids,
         thumb,
     })
 }
@@ -324,6 +353,7 @@ fn handle_reprog(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
     dpi_cids: &[u16],
+    nav_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
     match event {
@@ -350,6 +380,20 @@ fn handle_reprog(
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
+
+            // Per-button rising edge for the Back/Forward side buttons.
+            for &(cid, button) in nav_cids {
+                let down = cids.contains(&cid);
+                let was_down = acc.nav_held.contains(&cid);
+                if down && !was_down {
+                    let _ = sink.send(CapturedInput::ButtonPressed(button));
+                }
+            }
+            acc.nav_held = nav_cids
+                .iter()
+                .map(|&(cid, _)| cid)
+                .filter(|cid| cids.contains(cid))
+                .collect();
         }
         RawControlEvent::RawXy { dx, dy } => {
             // Accumulate until a clean direction commits, then fire immediately
