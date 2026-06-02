@@ -53,6 +53,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Registry",
 ] }
 
+# Embeds the app icon as resource id 1, which GPUI loads for the window/taskbar
+# (and our tray module loads for the notification-area icon).
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
 # Mirrors [workspace.lints], plus an allow for the legacy `cfg(cargo-clippy)`
 # check emitted by objc 0.2's macros (same as openlogi-hook). unsafe_code stays
 # denied; the menubar module opts in locally with #[expect(unsafe_code)].

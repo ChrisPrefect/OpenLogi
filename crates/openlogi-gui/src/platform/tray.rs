@@ -386,8 +386,19 @@ mod windows {
         let mut nid = unsafe { base_nid(hwnd) };
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_TRAYICON;
-        // SAFETY: a stock system icon; null hinstance is the documented usage.
-        nid.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+        // Prefer our embedded app icon (resource id 1, see build.rs); fall back
+        // to the stock application icon if it isn't present.
+        // SAFETY: `MAKEINTRESOURCEW(1)` is the documented way to name a resource
+        // by id; a null icon from a missing resource is handled by the fallback.
+        nid.hIcon = unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            let from_resource = LoadIconW(module, 1 as *const u16);
+            if from_resource.is_null() {
+                LoadIconW(std::ptr::null_mut(), IDI_APPLICATION)
+            } else {
+                from_resource
+            }
+        };
         let tip = wide("OpenLogi");
         let n = tip.len().min(nid.szTip.len());
         nid.szTip[..n].copy_from_slice(&tip[..n]);

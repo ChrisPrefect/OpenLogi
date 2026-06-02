@@ -88,7 +88,7 @@ pub fn open(cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
         "Settings",
-        Size::new(px(520.), px(360.)),
+        Size::new(px(540.), px(480.)),
         SettingsView::new,
         cx,
     );
@@ -307,7 +307,6 @@ fn language_row(
         .child(
             div()
                 .flex_1()
-                .min_w(px(0.))
                 .text_xs()
                 .text_color(pal.text_muted)
                 .child(tr!("Choose the interface language.")),
@@ -315,7 +314,7 @@ fn language_row(
         .child(
             Select::new(language_select)
                 .small()
-                .w(px(220.))
-                .menu_width(px(220.)),
+                .w(px(190.))
+                .menu_width(px(190.)),
         )
 }

@@ -1090,21 +1090,12 @@ mod windows {
         pub(in crate::binding) const MEDIA_PLAY_PAUSE: u16 = 0xB3;
     }
 
-    /// Keys that must carry `KEYEVENTF_EXTENDEDKEY` so the OS routes them
-    /// correctly (the Windows key and the multimedia / browser keys).
+    /// Keys that must carry `KEYEVENTF_EXTENDEDKEY`. Only the Windows key needs
+    /// it here. The consumer keys (volume / media / browser) are recognised from
+    /// their virtual-key code alone, and tagging them as extended actually stops
+    /// the volume keys from registering on some systems — so they are left off.
     fn is_extended(key: u16) -> bool {
-        matches!(
-            key,
-            vk::LWIN
-                | vk::BROWSER_BACK
-                | vk::BROWSER_FORWARD
-                | vk::VOLUME_MUTE
-                | vk::VOLUME_DOWN
-                | vk::VOLUME_UP
-                | vk::MEDIA_NEXT_TRACK
-                | vk::MEDIA_PREV_TRACK
-                | vk::MEDIA_PLAY_PAUSE
-        )
+        key == vk::LWIN
     }
 
     /// Build a keyboard `INPUT` for `key`, as a press (`up == false`) or
