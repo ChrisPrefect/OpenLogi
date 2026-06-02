@@ -152,13 +152,19 @@ impl AppView {
     }
 }
 
+/// Prompt for Accessibility access and open the relevant System Settings pane.
+/// macOS-only behavior; a no-op elsewhere (no such permission exists), but kept
+/// defined on all platforms so the (macOS-only) gate/footer call sites compile.
 fn open_accessibility_settings() {
-    openlogi_hook::Hook::prompt_accessibility();
-    if let Err(e) = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn()
+    #[cfg(target_os = "macos")]
     {
-        warn!(error = %e, "could not open System Settings");
+        openlogi_hook::Hook::prompt_accessibility();
+        if let Err(e) = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn()
+        {
+            warn!(error = %e, "could not open System Settings");
+        }
     }
 }
 
@@ -325,7 +331,7 @@ fn footer(pal: Palette, granted: bool) -> impl IntoElement {
                         .on_click(|_, _, cx| crate::windows::about::open(cx)),
                 ),
         )
-        .child(accessibility_status(pal, granted))
+        .children(accessibility_status(pal, granted))
         .child(
             div()
                 .text_xs()
@@ -345,31 +351,45 @@ fn footer_link(icon: IconName, label: SharedString) -> impl IntoElement {
         .child(label)
 }
 
-/// Footer Accessibility-permission indicator. Granted → a muted green-dot
-/// status; not granted → an amber-dot affordance that requests the grant on
-/// click (the native prompt + System Settings, via [`open_accessibility_settings`]).
-fn accessibility_status(pal: Palette, granted: bool) -> AnyElement {
-    let dot = |color: u32| div().size_2().rounded_full().bg(rgb(color));
-    if granted {
-        h_flex()
-            .gap_2()
-            .items_center()
-            .text_xs()
-            .text_color(pal.text_muted)
-            .child(dot(theme::STATUS_CONNECTED))
-            .child(div().child(tr!("Accessibility granted")))
-            .into_any_element()
-    } else {
-        h_flex()
-            .id("footer-accessibility")
-            .gap_2()
-            .items_center()
-            .text_xs()
-            .text_color(pal.text_primary)
-            .cursor_pointer()
-            .child(dot(theme::STATUS_CONNECTING))
-            .child(div().child(tr!("Accessibility not granted · click to grant")))
-            .on_click(|_, _, _| open_accessibility_settings())
-            .into_any_element()
+/// Footer Accessibility-permission indicator — **macOS only**. macOS needs an
+/// Accessibility grant for the event tap; granted → a muted green-dot status,
+/// not granted → an amber-dot affordance that requests the grant on click.
+///
+/// Other platforms have no such permission (the hook just works), so this
+/// returns `None` and the footer omits the row entirely.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(unused_variables, reason = "no accessibility row off macOS")
+)]
+fn accessibility_status(pal: Palette, granted: bool) -> Option<AnyElement> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let dot = |color: u32| div().size_2().rounded_full().bg(rgb(color));
+        Some(if granted {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .text_xs()
+                .text_color(pal.text_muted)
+                .child(dot(theme::STATUS_CONNECTED))
+                .child(div().child(tr!("Accessibility granted")))
+                .into_any_element()
+        } else {
+            h_flex()
+                .id("footer-accessibility")
+                .gap_2()
+                .items_center()
+                .text_xs()
+                .text_color(pal.text_primary)
+                .cursor_pointer()
+                .child(dot(theme::STATUS_CONNECTING))
+                .child(div().child(tr!("Accessibility not granted · click to grant")))
+                .on_click(|_, _, _| open_accessibility_settings())
+                .into_any_element()
+        })
     }
 }
