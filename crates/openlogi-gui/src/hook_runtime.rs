@@ -5,8 +5,9 @@
 //! surface between them: the binding map mirrored from `AppState`, lazy hook
 //! installation, and action dispatch for both hook and gesture events.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 use openlogi_core::binding::{Action, ButtonId};
 use openlogi_hid::CaptureChannel;
@@ -15,7 +16,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
-use crate::state::DpiCycleState;
+use crate::state::{DpiCycleState, RepeatConfig};
+
+/// Active auto-repeat timers for hook-captured buttons, keyed by button. Each
+/// value is the stop flag the repeat thread polls; setting it ends the loop.
+type HookRepeats = Arc<Mutex<HashMap<ButtonId, Arc<AtomicBool>>>>;
 
 /// Shared binding map threaded between `AppState` and the hook callback.
 pub type BindingMap = Arc<RwLock<BTreeMap<ButtonId, Action>>>;
@@ -44,6 +49,7 @@ pub fn start(
     bindings: BindingMap,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
+    repeat_config: Arc<RwLock<RepeatConfig>>,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -52,6 +58,11 @@ pub fn start(
         );
         return None;
     }
+
+    // Auto-repeat timers for buttons that arrive on this (OS-hook) path rather
+    // than over HID++ — e.g. a side button the device still delivers as a
+    // standard mouse button. Mirrors the gesture watcher's repeat behaviour.
+    let repeats: HookRepeats = Arc::new(Mutex::new(HashMap::new()));
 
     let result = Hook::start(move |event| match event {
         MouseEvent::Button { id, pressed } => {
@@ -89,6 +100,10 @@ pub fn start(
             if pressed {
                 info!(button = %id, action = %action.label(), "button → executing bound action");
                 dispatch_action(&action, &dpi_cycle, &capture);
+                start_hook_repeat(id, &action, &repeat_config, &dpi_cycle, &capture, &repeats);
+            } else {
+                // Button up: stop any auto-repeat started on its press.
+                stop_hook_repeat(id, &repeats);
             }
             EventDisposition::Suppress
         }
@@ -104,6 +119,62 @@ pub fn start(
             warn!(error = %e, "could not install OS mouse hook — events will not be captured");
             None
         }
+    }
+}
+
+/// Start (or restart) a hook-path auto-repeat thread for `id` when key-repeat
+/// is on and `action` is repeatable (volume / scroll). The first fire already
+/// happened on the press; this schedules the repeats — the first after the
+/// configured delay, then every interval — until [`stop_hook_repeat`] flips the
+/// stop flag on the button's release.
+///
+/// Uses a plain OS thread rather than a Tokio timer: this path has no async
+/// runtime, and running `SendInput` off the low-level-hook callback thread is
+/// also healthier than blocking inside it.
+fn start_hook_repeat(
+    id: ButtonId,
+    action: &Action,
+    repeat_config: &Arc<RwLock<RepeatConfig>>,
+    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    capture: &CaptureChannel,
+    repeats: &HookRepeats,
+) {
+    let cfg = repeat_config
+        .read()
+        .map_or_else(|_| RepeatConfig::default(), |g| *g);
+    if !cfg.enabled || !action.is_repeatable() {
+        return;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut guard = repeats.lock().unwrap_or_else(PoisonError::into_inner);
+        // Replace any stale timer for this button before starting a new one.
+        if let Some(old) = guard.insert(id, Arc::clone(&stop)) {
+            old.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let action = action.clone();
+    let dpi_cycle = Arc::clone(dpi_cycle);
+    let capture = Arc::clone(capture);
+    std::thread::spawn(move || {
+        std::thread::sleep(cfg.delay);
+        while !stop.load(Ordering::Relaxed) {
+            dispatch_action(&action, &dpi_cycle, &capture);
+            std::thread::sleep(cfg.interval);
+        }
+    });
+}
+
+/// Stop the auto-repeat thread for `id`, if one is running.
+fn stop_hook_repeat(id: ButtonId, repeats: &HookRepeats) {
+    if let Some(stop) = repeats
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&id)
+    {
+        stop.store(true, Ordering::Relaxed);
     }
 }
 

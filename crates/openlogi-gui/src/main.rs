@@ -115,16 +115,18 @@ fn main() -> Result<()> {
     // The capture session publishes its open HID++ channel here so DPI /
     // SmartShift writes reuse it instead of opening their own.
     let capture_channel: openlogi_hid::CaptureChannel = Arc::new(RwLock::new(None));
+    // Live key-repeat config, shared with both capture paths (the HID++ gesture
+    // watcher and the OS mouse hook) and updated by the Settings UI via
+    // `AppState`, so a held side button auto-repeats whichever path it arrives on.
+    let repeat_config = Arc::new(RwLock::new(RepeatConfig::from_settings(
+        &initial_config.app_settings,
+    )));
     let hook_arcs = (
         Arc::clone(&hook_bindings),
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
+        Arc::clone(&repeat_config),
     );
-    // Live key-repeat config, shared with the gesture watcher (auto-repeat of a
-    // held side button) and updated by the Settings UI via `AppState`.
-    let repeat_config = Arc::new(RwLock::new(RepeatConfig::from_settings(
-        &initial_config.app_settings,
-    )));
 
     // Resolve the UI locale before any menu or window is built so the first
     // frame already renders in the right language.
@@ -317,6 +319,7 @@ fn main() -> Result<()> {
                                 Arc::clone(&hook_arcs.0),
                                 Arc::clone(&hook_arcs.1),
                                 Arc::clone(&hook_arcs.2),
+                                Arc::clone(&hook_arcs.3),
                             );
                         }
                     }
