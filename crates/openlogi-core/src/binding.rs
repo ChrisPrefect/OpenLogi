@@ -513,6 +513,26 @@ impl Action {
         }
     }
 
+    /// Whether holding the bound button should auto-repeat this action (like a
+    /// held keyboard key), when key-repeat is enabled.
+    ///
+    /// Limited to the "analog" actions where repeating is the natural
+    /// expectation — volume and scroll. One-shot actions (Copy, tab switching,
+    /// DPI cycle, …) fire exactly once per press regardless: repeating them on a
+    /// held button would be surprising rather than useful.
+    #[must_use]
+    pub fn is_repeatable(&self) -> bool {
+        matches!(
+            self,
+            Action::VolumeUp
+                | Action::VolumeDown
+                | Action::ScrollUp
+                | Action::ScrollDown
+                | Action::HorizontalScrollLeft
+                | Action::HorizontalScrollRight
+        )
+    }
+
     /// All pickable actions in a deterministic order.
     ///
     /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via

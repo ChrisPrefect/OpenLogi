@@ -26,9 +26,11 @@ use tracing::{debug, warn};
 mod bindings;
 mod devices;
 mod dpi;
+mod repeat;
 
 pub use devices::DeviceRecord;
 pub use dpi::DpiCycleState;
+pub use repeat::RepeatConfig;
 
 use crate::asset::AssetResolver;
 use crate::data::mouse_buttons::{Action, ButtonId, GestureDirection};
@@ -82,6 +84,10 @@ pub struct AppState {
     /// watcher holds the other `Arc` clone, so writes here reach it without
     /// GPUI involvement.
     pub gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
+    /// Shared key-repeat config read by the gesture watcher when a held side
+    /// button bound to a repeatable action fires. The Settings UI updates it
+    /// via [`Self::set_key_repeat_enabled`] etc. so changes apply live.
+    pub repeat_config: Arc<RwLock<RepeatConfig>>,
 }
 
 impl AppState {
@@ -102,6 +108,7 @@ impl AppState {
         let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
         let gesture_arc = Arc::new(RwLock::new(BTreeMap::new()));
         let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
+        let repeat_arc = Arc::new(RwLock::new(RepeatConfig::from_settings(&config.app_settings)));
         Self::with_runtime_shared(
             config,
             inventories,
@@ -109,6 +116,7 @@ impl AppState {
             bindings_arc,
             gesture_arc,
             cycle_arc,
+            repeat_arc,
         )
     }
 
@@ -124,6 +132,7 @@ impl AppState {
         hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
         gesture_hook_bindings: Arc<RwLock<BTreeMap<GestureDirection, Action>>>,
         dpi_cycle: Arc<RwLock<DpiCycleState>>,
+        repeat_config: Arc<RwLock<RepeatConfig>>,
     ) -> Self {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -140,12 +149,14 @@ impl AppState {
             hook_bindings,
             dpi_cycle,
             gesture_hook_bindings,
+            repeat_config,
         };
         state.button_bindings = state.bindings_for_current();
         state.gesture_bindings = state.gesture_bindings_for_current();
         state.sync_hook_bindings();
         state.sync_gesture_bindings();
         state.sync_dpi_cycle();
+        state.sync_repeat_config();
         state
     }
 
@@ -358,6 +369,57 @@ impl AppState {
         self.config.app_settings.check_for_updates = enabled;
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist update-check setting");
+        }
+    }
+
+    /// Enable or disable side-button auto-repeat. Persists and applies live to
+    /// the gesture watcher via the shared [`RepeatConfig`]. No-op when unchanged.
+    pub fn set_key_repeat_enabled(&mut self, enabled: bool) {
+        if self.config.app_settings.key_repeat_enabled == enabled {
+            return;
+        }
+        self.config.app_settings.key_repeat_enabled = enabled;
+        self.persist_and_sync_repeat();
+    }
+
+    /// Set the auto-repeat start delay (ms). Persists + applies live. No-op when
+    /// unchanged.
+    pub fn set_key_repeat_delay_ms(&mut self, ms: u32) {
+        if self.config.app_settings.key_repeat_delay_ms == ms {
+            return;
+        }
+        self.config.app_settings.key_repeat_delay_ms = ms;
+        self.persist_and_sync_repeat();
+    }
+
+    /// Set the auto-repeat interval (ms; smaller = faster). Persists + applies
+    /// live. No-op when unchanged.
+    pub fn set_key_repeat_interval_ms(&mut self, ms: u32) {
+        if self.config.app_settings.key_repeat_interval_ms == ms {
+            return;
+        }
+        self.config.app_settings.key_repeat_interval_ms = ms;
+        self.persist_and_sync_repeat();
+    }
+
+    /// Persist the config and push the current key-repeat settings into the
+    /// shared [`RepeatConfig`] the gesture watcher reads.
+    fn persist_and_sync_repeat(&self) {
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist key-repeat setting");
+        }
+        self.sync_repeat_config();
+    }
+
+    /// Mirror the persisted key-repeat settings into the watcher-shared
+    /// [`RepeatConfig`] `Arc`. Called on build and after any repeat-field edit.
+    fn sync_repeat_config(&self) {
+        match self.repeat_config.write() {
+            Ok(mut guard) => *guard = RepeatConfig::from_settings(&self.config.app_settings),
+            Err(e) => warn!(
+                error = %e,
+                "repeat_config lock poisoned — watcher will keep stale repeat settings"
+            ),
         }
     }
 

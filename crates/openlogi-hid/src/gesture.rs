@@ -40,9 +40,14 @@ pub enum CapturedInput {
     /// A completed gesture-button swipe.
     Gesture(GestureDirection),
     /// A diverted button was pressed — the DPI/ModeShift button
-    /// ([`ButtonId::DpiToggle`]) or the thumb-wheel single tap
-    /// ([`ButtonId::Thumbwheel`]).
+    /// ([`ButtonId::DpiToggle`]), a Back/Forward side button, or the
+    /// thumb-wheel single tap ([`ButtonId::Thumbwheel`]).
     ButtonPressed(ButtonId),
+    /// A diverted *hold-capable* button was released — the DPI/ModeShift
+    /// button or a Back/Forward side button. Emitted on the falling edge so a
+    /// consumer can stop an auto-repeat started on the matching press. The
+    /// thumb-wheel single tap has no hold/release and never emits this.
+    ButtonReleased(ButtonId),
     /// Thumb-wheel rotation to re-synthesise as horizontal scroll, in the
     /// wheel's `diverted_res` increments. Emitted only while the wheel is
     /// diverted to capture its click.
@@ -378,15 +383,21 @@ fn handle_reprog(
             let dpi_down = dpi_cids.iter().any(|cid| cids.contains(cid));
             if dpi_down && !acc.dpi_down {
                 let _ = sink.send(CapturedInput::ButtonPressed(ButtonId::DpiToggle));
+            } else if !dpi_down && acc.dpi_down {
+                let _ = sink.send(CapturedInput::ButtonReleased(ButtonId::DpiToggle));
             }
             acc.dpi_down = dpi_down;
 
-            // Per-button rising edge for the Back/Forward side buttons.
+            // Per-button rising/falling edge for the Back/Forward side buttons —
+            // both edges, so a consumer can bracket an auto-repeat (press → start,
+            // release → stop).
             for &(cid, button) in nav_cids {
                 let down = cids.contains(&cid);
                 let was_down = acc.nav_held.contains(&cid);
                 if down && !was_down {
                     let _ = sink.send(CapturedInput::ButtonPressed(button));
+                } else if !down && was_down {
+                    let _ = sink.send(CapturedInput::ButtonReleased(button));
                 }
             }
             acc.nav_held = nav_cids
@@ -432,14 +443,15 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut acc = CaptureAccum::default();
 
-        handle_reprog(&mut acc, press(), &[], &tx);
+        handle_reprog(&mut acc, press(), &[], &[], &tx);
         handle_reprog(
             &mut acc,
             RawControlEvent::RawXy { dx: 120, dy: 5 },
             &[],
+            &[],
             &tx,
         );
-        handle_reprog(&mut acc, release(), &[], &tx);
+        handle_reprog(&mut acc, release(), &[], &[], &tx);
 
         assert_eq!(
             rx.try_recv(),
@@ -456,12 +468,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut acc = CaptureAccum::default();
 
-        handle_reprog(&mut acc, press(), &[], &tx);
+        handle_reprog(&mut acc, press(), &[], &[], &tx);
         // Pretend the button has been held well past the swipe gate.
         acc.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
         handle_reprog(
             &mut acc,
             RawControlEvent::RawXy { dx: 120, dy: 5 },
+            &[],
             &[],
             &tx,
         );
@@ -471,7 +484,7 @@ mod tests {
             Ok(CapturedInput::Gesture(GestureDirection::Right))
         );
 
-        handle_reprog(&mut acc, release(), &[], &tx);
+        handle_reprog(&mut acc, release(), &[], &[], &tx);
         assert!(
             rx.try_recv().is_err(),
             "a committed swipe must not also click on release"
@@ -485,13 +498,39 @@ mod tests {
         let dpi = reprog_controls::DPI_MODE_SHIFT_CIDS[0];
         let down = RawControlEvent::DivertedButtons([dpi, 0, 0, 0]);
 
-        handle_reprog(&mut acc, down, &[dpi], &tx);
-        handle_reprog(&mut acc, down, &[dpi], &tx);
+        handle_reprog(&mut acc, down, &[dpi], &[], &tx);
+        handle_reprog(&mut acc, down, &[dpi], &[], &tx);
 
         assert_eq!(
             rx.try_recv(),
             Ok(CapturedInput::ButtonPressed(ButtonId::DpiToggle))
         );
         assert!(rx.try_recv().is_err(), "a held DPI button presses once");
+    }
+
+    #[test]
+    fn a_nav_button_emits_press_then_release_on_its_edges() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let back = reprog_controls::BACK_CID;
+        let nav = [(back, ButtonId::Back)];
+        let down = RawControlEvent::DivertedButtons([back, 0, 0, 0]);
+        let up = RawControlEvent::DivertedButtons([0, 0, 0, 0]);
+
+        // Press, then a redundant held message, then release.
+        handle_reprog(&mut acc, down, &[], &nav, &tx);
+        handle_reprog(&mut acc, down, &[], &nav, &tx);
+        handle_reprog(&mut acc, up, &[], &nav, &tx);
+
+        assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonPressed(ButtonId::Back)));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonReleased(ButtonId::Back)),
+            "release fires exactly once on the falling edge"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a held-then-released nav button emits one press and one release"
+        );
     }
 }

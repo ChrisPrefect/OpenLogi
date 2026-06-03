@@ -65,7 +65,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
 use crate::hook_runtime::BindingMap;
-use crate::state::{AppState, DpiCycleState};
+use crate::state::{AppState, DpiCycleState, RepeatConfig};
 
 #[allow(
     clippy::too_many_lines,
@@ -120,6 +120,11 @@ fn main() -> Result<()> {
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
     );
+    // Live key-repeat config, shared with the gesture watcher (auto-repeat of a
+    // held side button) and updated by the Settings UI via `AppState`.
+    let repeat_config = Arc::new(RwLock::new(RepeatConfig::from_settings(
+        &initial_config.app_settings,
+    )));
 
     // Resolve the UI locale before any menu or window is built so the first
     // frame already renders in the right language.
@@ -133,6 +138,7 @@ fn main() -> Result<()> {
         Arc::clone(&gesture_bindings),
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
+        Arc::clone(&repeat_config),
     );
 
     let mut inventory_rx = watchers::inventory::spawn(std::time::Duration::from_secs(2));
@@ -242,6 +248,7 @@ fn main() -> Result<()> {
                         hook_bindings,
                         gesture_bindings,
                         dpi_cycle,
+                        repeat_config,
                     ));
                 }
                 if !start_minimized {

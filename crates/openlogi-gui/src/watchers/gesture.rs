@@ -15,7 +15,7 @@
 //! the events arrive over HID++, and the bound action is synthesised the same
 //! way regardless.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -23,10 +23,11 @@ use std::time::Duration;
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::hook_runtime::{self, BindingMap};
-use crate::state::DpiCycleState;
+use crate::state::{DpiCycleState, RepeatConfig};
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -44,6 +45,7 @@ pub fn spawn(
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
+    repeat_config: Arc<RwLock<RepeatConfig>>,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -61,6 +63,7 @@ pub fn spawn(
             gesture_bindings,
             dpi_cycle,
             capture_channel,
+            repeat_config,
         ));
     });
 }
@@ -84,16 +87,37 @@ async fn manage(
     gesture_bindings: GestureBindings,
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
+    repeat_config: Arc<RwLock<RepeatConfig>>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     let mut current: Option<(DeviceRoute, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
+    // Live auto-repeat timers, one per currently-held repeatable button.
+    let mut repeats: HashMap<ButtonId, JoinHandle<()>> = HashMap::new();
 
     loop {
         tokio::select! {
             Some(input) = rx.recv() => {
                 dispatch(input, &button_bindings, &gesture_bindings, &dpi_cycle, &capture_channel);
+                match input {
+                    // Held repeatable button down → start its auto-repeat timer.
+                    CapturedInput::ButtonPressed(button) => start_repeat_if_applicable(
+                        button,
+                        &button_bindings,
+                        &repeat_config,
+                        &dpi_cycle,
+                        &capture_channel,
+                        &mut repeats,
+                    ),
+                    // Button up → cancel the repeat for it, if any.
+                    CapturedInput::ButtonReleased(button) => {
+                        if let Some(handle) = repeats.remove(&button) {
+                            handle.abort();
+                        }
+                    }
+                    _ => {}
+                }
             }
             _ = ticker.tick() => {
                 let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
@@ -106,6 +130,11 @@ async fn manage(
                 // oneshot lets the old session restore the diverted controls.
                 if let Some(stop) = stop.take() {
                     let _ = stop.send(());
+                }
+                // The device is changing out from under any in-flight repeats —
+                // cancel them so they can't fire at the new (or no) device.
+                for (_, handle) in repeats.drain() {
+                    handle.abort();
                 }
                 current.clone_from(&want);
                 if let Some((route, capture_thumbwheel)) = want {
@@ -163,10 +192,75 @@ fn dispatch(
                 debug!(?button, "HID++ button with no binding — ignored");
             }
         }
+        CapturedInput::ButtonReleased(_) => {
+            // Release is only meaningful for stopping auto-repeat, handled by the
+            // caller; there's no action to fire on the falling edge itself.
+        }
         CapturedInput::Scroll(rotation) => {
             // Re-inject native horizontal scroll the diverted thumb wheel no
             // longer produces. Sign/magnitude may need per-device tuning.
             openlogi_core::binding::post_horizontal_scroll(i32::from(rotation));
         }
     }
+}
+
+/// Start (or restart) an auto-repeat timer for `button` when key-repeat is on
+/// and its bound action is repeatable.
+///
+/// Restricted to the hold-capable buttons that emit a matching
+/// [`CapturedInput::ButtonReleased`] (Back / Forward / DPI) — so every timer
+/// started here is guaranteed to be cancelled on release, never left spinning.
+/// The thumb-wheel single tap is excluded: it has no release edge.
+///
+/// The first fire already happened in [`dispatch`] on the press; this schedules
+/// the *repeats*: the first after `delay`, then every `interval`.
+fn start_repeat_if_applicable(
+    button: ButtonId,
+    button_bindings: &BindingMap,
+    repeat_config: &Arc<RwLock<RepeatConfig>>,
+    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    capture: &CaptureChannel,
+    repeats: &mut HashMap<ButtonId, JoinHandle<()>>,
+) {
+    if !matches!(
+        button,
+        ButtonId::Back | ButtonId::Forward | ButtonId::DpiToggle
+    ) {
+        return;
+    }
+    let cfg = repeat_config
+        .read()
+        .ok()
+        .map_or_else(RepeatConfig::default, |guard| *guard);
+    if !cfg.enabled {
+        return;
+    }
+    let Some(action) = button_bindings
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(&button).cloned())
+    else {
+        return;
+    };
+    if !action.is_repeatable() {
+        return;
+    }
+    // Replace any stale timer (e.g. a press whose release was missed) before
+    // starting a fresh one, so a button can never accumulate two repeaters.
+    if let Some(handle) = repeats.remove(&button) {
+        handle.abort();
+    }
+    let dpi_cycle = Arc::clone(dpi_cycle);
+    let capture = Arc::clone(capture);
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(cfg.delay).await;
+        let mut tick = tokio::time::interval(cfg.interval);
+        loop {
+            // `interval`'s first tick resolves immediately → the first repeat
+            // lands exactly `delay` after the press, then every `interval`.
+            tick.tick().await;
+            hook_runtime::dispatch_action(&action, &dpi_cycle, &capture);
+        }
+    });
+    repeats.insert(button, handle);
 }

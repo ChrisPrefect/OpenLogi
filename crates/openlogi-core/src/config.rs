@@ -94,6 +94,20 @@ pub struct AppSettings {
     /// the OS setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Whether holding a side button bound to a repeatable action (volume /
+    /// scroll) auto-repeats it, like a held keyboard key. `true` by default;
+    /// repeat only ever applies to [`Action::is_repeatable`] actions, so a
+    /// held button bound to a one-shot action is unaffected either way.
+    #[serde(default = "default_true")]
+    pub key_repeat_enabled: bool,
+    /// Delay before auto-repeat begins, in milliseconds (the initial "hold"
+    /// grace period after the first fire). Default 400 ms.
+    #[serde(default = "default_repeat_delay_ms")]
+    pub key_repeat_delay_ms: u32,
+    /// Interval between auto-repeat fires, in milliseconds (smaller = faster).
+    /// Default 60 ms.
+    #[serde(default = "default_repeat_interval_ms")]
+    pub key_repeat_interval_ms: u32,
 }
 
 impl AppSettings {
@@ -113,6 +127,9 @@ impl Default for AppSettings {
             update_prompt_seen: false,
             show_in_menu_bar: true,
             language: None,
+            key_repeat_enabled: true,
+            key_repeat_delay_ms: default_repeat_delay_ms(),
+            key_repeat_interval_ms: default_repeat_interval_ms(),
         }
     }
 }
@@ -121,6 +138,18 @@ impl Default for AppSettings {
 /// icon is on out of the box and configs predating the field keep that behavior.
 fn default_true() -> bool {
     true
+}
+
+/// serde default for [`AppSettings::key_repeat_delay_ms`]: 400 ms before
+/// auto-repeat starts.
+fn default_repeat_delay_ms() -> u32 {
+    400
+}
+
+/// serde default for [`AppSettings::key_repeat_interval_ms`]: 60 ms between
+/// auto-repeat fires.
+fn default_repeat_interval_ms() -> u32 {
+    60
 }
 
 /// Settings scoped to a single physical device (keyed by HID++ model+ext).
