@@ -135,12 +135,18 @@ fn main() -> Result<()> {
     // HID++ control capture (gesture button, DPI/ModeShift button, thumb wheel)
     // runs independently of the CGEventTap hook — it needs no Accessibility
     // permission — so start it up front for the active device.
+    // DPI-set requests from the loopback control channel (`--set-dpi`) are
+    // executed by the gesture watcher, which owns the HID channel.
+    let (dpi_request_tx, dpi_request_rx) =
+        tokio::sync::mpsc::unbounded_channel::<watchers::gesture::DpiRequest>();
+
     watchers::gesture::spawn(
         Arc::clone(&hook_bindings),
         Arc::clone(&gesture_bindings),
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
         Arc::clone(&repeat_config),
+        dpi_request_rx,
     );
 
     let mut inventory_rx = watchers::inventory::spawn(std::time::Duration::from_secs(2));
@@ -157,14 +163,11 @@ fn main() -> Result<()> {
     hook_runtime::set_flash_sink(flash_tx);
 
     // Loopback control channel for `OpenLogi.exe --set-dpi <N>` (e.g. from a
-    // `.cmd`). The server writes DPI on the capture session's open channel and
-    // pushes the applied value back here so the slider label stays in sync.
+    // `.cmd`). The server hands the write to the gesture watcher (which owns the
+    // HID channel) and pushes the applied value back here so the slider label
+    // stays in sync.
     let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
-    control::serve(
-        Arc::clone(&capture_channel),
-        Arc::clone(&dpi_cycle),
-        control_tx,
-    );
+    control::serve(dpi_request_tx, control_tx);
 
     // Tray click events (Open / Quit), drained by a dedicated task below.
     // macOS status item + Windows notification-area icon; no tray on Linux.

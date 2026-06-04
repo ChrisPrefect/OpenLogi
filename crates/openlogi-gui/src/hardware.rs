@@ -100,24 +100,6 @@ pub fn write_dpi_in_background(
     });
 }
 
-/// Synchronously write `dpi` to `target`, reusing the capture session's open
-/// channel when it already reaches the device. Builds a one-shot Tokio runtime
-/// on the **calling thread** and blocks until the write + read-back finishes,
-/// so it must never run on the GPUI thread. Returns `Ok(reused)` — whether the
-/// capture channel was reused (`true`) or a transient one was opened (`false`).
-///
-/// Backs the localhost control channel (`--set-dpi`), where the caller needs
-/// the success/failure result to report back to the invoking `.cmd`.
-pub fn set_dpi_sync(
-    capture: Option<&CaptureChannel>,
-    target: &DeviceRoute,
-    dpi: u16,
-) -> Result<bool, String> {
-    let shared = reusable_channel(capture, target);
-    let reused = shared.is_some();
-    run_dpi_write(shared.as_ref(), target, dpi).map(|()| reused)
-}
-
 /// The DPI write itself: on a fresh single-thread Tokio runtime, reuse the
 /// already-resolved `shared` capture channel or open a transient one for
 /// `target`. Blocking — runs on whatever worker thread the caller spawned.

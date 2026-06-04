@@ -21,13 +21,27 @@ use std::thread;
 use std::time::Duration;
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
-use openlogi_hid::{CaptureChannel, CapturedInput, DeviceRoute, run_capture_session};
+use openlogi_hid::{
+    CaptureChannel, CapturedInput, DeviceRoute, run_capture_session, set_dpi, set_dpi_on,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::hook_runtime::{self, BindingMap};
 use crate::state::{DpiCycleState, RepeatConfig};
+
+/// A DPI-set request handed in from the control channel (`--set-dpi`).
+///
+/// The write is performed on **this watcher's runtime** — the one that owns the
+/// open HID++ channel — rather than on the control-server thread. Touching the
+/// shared channel from a foreign runtime deadlocks (its I/O is bound to the
+/// runtime that opened it), which is what previously hung `--set-dpi` against a
+/// running instance. The `reply` carries the outcome back to the control server.
+pub struct DpiRequest {
+    pub dpi: u16,
+    pub reply: std::sync::mpsc::Sender<Result<(), String>>,
+}
 
 /// Shared gesture-direction binding map, mirrored from `AppState` (keyed by
 /// direction). The watcher reads it to map a captured swipe to a bound action.
@@ -46,6 +60,7 @@ pub fn spawn(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     repeat_config: Arc<RwLock<RepeatConfig>>,
+    dpi_request_rx: mpsc::UnboundedReceiver<DpiRequest>,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -64,6 +79,7 @@ pub fn spawn(
             dpi_cycle,
             capture_channel,
             repeat_config,
+            dpi_request_rx,
         ));
     });
 }
@@ -88,10 +104,14 @@ async fn manage(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture_channel: CaptureChannel,
     repeat_config: Arc<RwLock<RepeatConfig>>,
+    mut dpi_request_rx: mpsc::UnboundedReceiver<DpiRequest>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     let mut current: Option<(DeviceRoute, bool)> = None;
     let mut stop: Option<oneshot::Sender<()>> = None;
+    // The running capture-session task, watched so a session that ends
+    // unexpectedly (device hiccup, channel error) is restarted on the next tick.
+    let mut session: Option<JoinHandle<()>> = None;
     let mut ticker = tokio::time::interval(TARGET_POLL);
     // Live auto-repeat timers, one per currently-held repeatable button.
     let mut repeats: HashMap<ButtonId, JoinHandle<()>> = HashMap::new();
@@ -119,15 +139,36 @@ async fn manage(
                     _ => {}
                 }
             }
+            // A `--set-dpi` request routed in from the control channel. Perform
+            // the write here, on the runtime that owns the open HID channel —
+            // reusing it when a session is live, else opening a transient one.
+            Some(req) = dpi_request_rx.recv() => {
+                let shared = capture_channel.read().ok().and_then(|slot| (*slot).clone());
+                let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
+                tokio::spawn(async move {
+                    let result = match (shared, target) {
+                        (Some(shared), _) => set_dpi_on(&shared, req.dpi).await.map_err(|e| format!("{e}")),
+                        (None, Some(target)) => set_dpi(&target, req.dpi).await.map_err(|e| format!("{e}")),
+                        (None, None) => Err("no active device".to_string()),
+                    };
+                    let _ = req.reply.send(result);
+                });
+            }
             _ = ticker.tick() => {
                 let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                 let want = target.map(|t| (t, thumbwheel_armed(&button_bindings)));
-                if want == current {
+                // Restart when the desired target changed OR the live session
+                // died unexpectedly (self-healing) — otherwise leave it running.
+                let session_dead = session.as_ref().is_some_and(JoinHandle::is_finished);
+                if want == current && !session_dead {
                     continue;
                 }
-                // Target or thumb-wheel arming changed (or first tick): stop the
-                // old session and start one for the new state. Sending on the
-                // oneshot lets the old session restore the diverted controls.
+                if session_dead && want == current {
+                    warn!("capture session ended unexpectedly — restarting");
+                }
+                // Target/arming changed or the session died: stop the old session
+                // and start one for the new state. Sending on the oneshot lets the
+                // old session restore the diverted controls.
                 if let Some(stop) = stop.take() {
                     let _ = stop.send(());
                 }
@@ -141,14 +182,16 @@ async fn manage(
                     let (stop_tx, stop_rx) = oneshot::channel();
                     let sink = tx.clone();
                     let slot = Arc::clone(&capture_channel);
-                    tokio::spawn(async move {
+                    session = Some(tokio::spawn(async move {
                         if let Err(e) =
                             run_capture_session(route, capture_thumbwheel, sink, stop_rx, slot).await
                         {
                             debug!(error = %e, "capture session ended");
                         }
-                    });
+                    }));
                     stop = Some(stop_tx);
+                } else {
+                    session = None;
                 }
             }
         }

@@ -237,7 +237,9 @@ async fn arm_controls(
     let mut reprog: Option<(ReprogControlsV4, u8)> = None;
     let mut gesture_diverted = false;
     let mut dpi_cids: Vec<u16> = Vec::new();
-    let mut nav_cids: Vec<(u16, ButtonId)> = Vec::new();
+    // Back/Forward are intentionally never diverted (see the loop below), so this
+    // stays empty — kept for `ArmedControls` shape and the capture summary log.
+    let nav_cids: Vec<(u16, ButtonId)> = Vec::new();
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -264,18 +266,23 @@ async fn arm_controls(
                 dpi_cids.push(cid);
             }
         }
-        // Back / Forward side buttons: on devices that don't deliver them as
-        // standard mouse events (e.g. the MX Anywhere 3S on Windows), divert
-        // them over HID++ so OpenLogi can dispatch their bound action.
-        for &(cid, button) in &[
-            (reprog_controls::BACK_CID, ButtonId::Back),
-            (reprog_controls::FORWARD_CID, ButtonId::Forward),
-        ] {
-            if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-                rc.set_cid_reporting(cid, true, false)
-                    .await
-                    .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
-                nav_cids.push((cid, button));
+        // Back / Forward side buttons: deliberately NOT diverted. They are
+        // standard mouse buttons the OS hook captures directly, with proper
+        // press / hold / release — which the HID++ "diverted button" event does
+        // not reliably provide (it can arrive as a momentary pulse, which breaks
+        // auto-repeat) and which, if left diverted after an unclean exit, wedges
+        // the firmware until the mouse is power-cycled.
+        //
+        // So instead of diverting them we *actively clear* any lingering
+        // diversion on these CIDs every time we arm — e.g. one left behind by an
+        // older OpenLogi build or a previous crash — restoring native
+        // mouse-button behaviour. This is the self-healing reset for the side
+        // buttons.
+        for &cid in &[reprog_controls::BACK_CID, reprog_controls::FORWARD_CID] {
+            if controls.iter().any(|c| c.cid == cid && c.is_divertable())
+                && let Err(e) = rc.set_cid_reporting(cid, false, false).await
+            {
+                warn!(cid, error = ?e, "could not clear lingering nav-button diversion");
             }
         }
         reprog = Some((rc, info.index));

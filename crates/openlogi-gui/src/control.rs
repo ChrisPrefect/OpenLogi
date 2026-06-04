@@ -16,15 +16,13 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use openlogi_hid::{CaptureChannel, DeviceRoute};
+use openlogi_hid::DeviceRoute;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
-use crate::hardware;
-use crate::state::DpiCycleState;
+use crate::watchers::gesture::DpiRequest;
 
 /// Loopback port the control server listens on. Fixed (the client needs to find
 /// it without coordination) and uncommon enough to avoid clashes.
@@ -41,19 +39,15 @@ fn addr() -> SocketAddr {
 
 /// Start the control server on a dedicated thread.
 ///
-/// - `capture` lets writes reuse the capture session's open HID++ channel.
-/// - `dpi_cycle` carries the active device's route (kept current as the
-///   carousel selection changes), so the server knows which device to write.
+/// - `dpi_request_tx` hands the actual write to the capture watcher, which owns
+///   the open HID channel and performs the write on its own runtime (touching
+///   the channel from this server thread would deadlock).
 /// - `label_tx` posts the applied DPI back to the GPUI loop so the slider label
 ///   tracks an out-of-process change.
 ///
 /// A failed bind (port already taken) is logged, not fatal: the GUI runs fine
 /// without the control channel; only `--set-dpi` against this instance is lost.
-pub fn serve(
-    capture: CaptureChannel,
-    dpi_cycle: Arc<RwLock<DpiCycleState>>,
-    label_tx: UnboundedSender<u32>,
-) {
+pub fn serve(dpi_request_tx: UnboundedSender<DpiRequest>, label_tx: UnboundedSender<u32>) {
     let spawned = std::thread::Builder::new()
         .name("openlogi-control".into())
         .spawn(move || {
@@ -71,7 +65,7 @@ pub fn serve(
             info!(port = PORT, "control server listening");
             for stream in listener.incoming() {
                 match stream {
-                    Ok(s) => handle_conn(s, &capture, &dpi_cycle, &label_tx),
+                    Ok(s) => handle_conn(s, &dpi_request_tx, &label_tx),
                     Err(e) => debug!(error = %e, "control accept failed"),
                 }
             }
@@ -84,8 +78,7 @@ pub fn serve(
 /// Read one request line, dispatch it, and write the response line back.
 fn handle_conn(
     stream: TcpStream,
-    capture: &CaptureChannel,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_request_tx: &UnboundedSender<DpiRequest>,
     label_tx: &UnboundedSender<u32>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -97,7 +90,7 @@ fn handle_conn(
     if reader.read_line(&mut line).is_err() {
         return;
     }
-    let response = dispatch(line.trim(), capture, dpi_cycle, label_tx);
+    let response = dispatch(line.trim(), dpi_request_tx, label_tx);
     let mut write_half = stream;
     let _ = writeln!(write_half, "{response}");
 }
@@ -105,14 +98,13 @@ fn handle_conn(
 /// Parse and execute one command line, returning the response line.
 fn dispatch(
     line: &str,
-    capture: &CaptureChannel,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_request_tx: &UnboundedSender<DpiRequest>,
     label_tx: &UnboundedSender<u32>,
 ) -> String {
     let mut parts = line.split_whitespace();
     match parts.next() {
         Some("set-dpi") => match parts.next().map(str::parse::<u16>) {
-            Some(Ok(dpi)) => apply_set_dpi(dpi, capture, dpi_cycle, label_tx),
+            Some(Ok(dpi)) => apply_set_dpi(dpi, dpi_request_tx, label_tx),
             Some(Err(_)) => "err invalid DPI value".to_string(),
             None => "err missing DPI value".to_string(),
         },
@@ -121,29 +113,29 @@ fn dispatch(
     }
 }
 
-/// Apply a DPI write requested over the control channel, reusing the open
-/// capture channel and notifying the UI of the new value.
+/// Apply a DPI write requested over the control channel: hand it to the capture
+/// watcher (which owns the HID channel), wait for the result, and notify the UI.
 fn apply_set_dpi(
     dpi: u16,
-    capture: &CaptureChannel,
-    dpi_cycle: &Arc<RwLock<DpiCycleState>>,
+    dpi_request_tx: &UnboundedSender<DpiRequest>,
     label_tx: &UnboundedSender<u32>,
 ) -> String {
     if !(DPI_MIN..=DPI_MAX).contains(&dpi) {
         return format!("err DPI {dpi} out of range {DPI_MIN}-{DPI_MAX}");
     }
-    let target = dpi_cycle.read().ok().and_then(|c| c.target.clone());
-    let Some(target) = target else {
-        return "err no active device".to_string();
-    };
-    match hardware::set_dpi_sync(Some(capture), &target, dpi) {
-        Ok(reused) => {
-            info!(dpi, reused, "DPI set via control channel");
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if dpi_request_tx.send(DpiRequest { dpi, reply: reply_tx }).is_err() {
+        return "err app is shutting down".to_string();
+    }
+    match reply_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {
+            info!(dpi, "DPI set via control channel");
             // Keep the slider label in step with the out-of-process change.
             let _ = label_tx.send(u32::from(dpi));
             format!("ok {dpi}")
         }
-        Err(e) => format!("err {e}"),
+        Ok(Err(e)) => format!("err {e}"),
+        Err(_) => "err timed out waiting for the DPI write".to_string(),
     }
 }
 
