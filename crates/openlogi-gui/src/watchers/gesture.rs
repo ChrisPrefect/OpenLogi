@@ -299,6 +299,7 @@ fn start_repeat_if_applicable(
     if let Some(handle) = repeats.remove(&button) {
         handle.abort();
     }
+    debug!(?button, delay = ?cfg.delay, interval = ?cfg.interval, "auto-repeat armed");
     let dpi_cycle = Arc::clone(dpi_cycle);
     let capture = Arc::clone(capture);
     let handle = tokio::spawn(async move {

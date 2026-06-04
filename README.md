@@ -1,3 +1,29 @@
+> [!NOTE]
+> ## 🪟 OpenLogi for Windows — a fork
+>
+> This is a **Windows port of OpenLogi**, maintained by [**ChrisPrefect**](https://github.com/ChrisPrefect).
+> Upstream OpenLogi is macOS-first; **this fork is focused exclusively on Windows** — all
+> work here targets Windows 10 (1703+) / 11. The macOS code paths are inherited from
+> upstream and carried along unchanged, but they are not the focus of this fork. Linux
+> remains on the upstream roadmap.
+>
+> **Original project:** https://github.com/AprilNEA/OpenLogi
+> **Windows downloads:** [Releases](https://github.com/ChrisPrefect/OpenLogi/releases) · branch `feature/windows-port`
+>
+> ### What this fork added / changed for Windows
+> - **Native Windows input layer** — a `WH_MOUSE_LL` low-level mouse hook (in place of macOS's `CGEventTap`) and `SendInput`-based action synthesis (keyboard chords, media & volume keys, mouse clicks, scroll), with macOS-only actions mapped to their closest Windows shell equivalent.
+> - **HID++ side-button capture** — Back/Forward are diverted over HID++ (`0x1b04` reprogrammable controls). On this hardware the standard mouse button is delivered as a momentary pulse even while held, so the HID++ event is the only way to detect a real hold.
+> - **Hold-to-repeat (key repeat)** — holding a side button bound to volume or scrolling repeats the action, with a configurable on/off switch, start delay and rate (Settings → *Key repeat*).
+> - **Scriptable DPI** — `OpenLogi.exe --set-dpi <N>` sets the mouse DPI from a `.cmd`/script. It is routed to the already-running instance over a localhost control channel (no second device handle), or opens the device directly when nothing is running.
+> - **Self-update** — `OpenLogi.exe --update` (and *About → Check for Updates*) downloads the latest GitHub release and self-replaces.
+> - **Windows tray + autostart** — notification-area icon (`Shell_NotifyIcon`), close-to-tray (window close keeps the app running), launch-at-login via the `HKCU…\Run` registry key.
+> - **Self-contained build** — statically linked CRT (no VC++ redistributable needed), GUI subsystem (no console window pop-up), embedded app/window/tray icon.
+> - **Robustness / self-healing** — the HID++ capture session auto-restarts if it drops; lingering device state is reset on startup.
+>
+> The original README continues below.
+
+---
+
 > [!WARNING]
 > **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified the moment a release lands.
 

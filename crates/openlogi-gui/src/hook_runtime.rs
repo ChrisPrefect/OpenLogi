@@ -13,7 +13,7 @@ use openlogi_core::binding::{Action, ButtonId};
 use openlogi_hid::CaptureChannel;
 use openlogi_hook::{EventDisposition, Hook, MouseEvent};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::state::{DpiCycleState, RepeatConfig};
@@ -160,10 +160,13 @@ fn start_hook_repeat(
     let capture = Arc::clone(capture);
     std::thread::spawn(move || {
         std::thread::sleep(cfg.delay);
+        let mut fires = 0u32;
         while !stop.load(Ordering::Relaxed) {
             dispatch_action(&action, &dpi_cycle, &capture);
+            fires += 1;
             std::thread::sleep(cfg.interval);
         }
+        debug!(button = %id, fires, "hook repeat ended");
     });
 }
 
