@@ -26,7 +26,7 @@ use openlogi_hid::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::hook_runtime::{self, BindingMap};
 use crate::state::{DpiCycleState, RepeatConfig};
@@ -146,11 +146,17 @@ async fn manage(
                 let shared = capture_channel.read().ok().and_then(|slot| (*slot).clone());
                 let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());
                 tokio::spawn(async move {
+                    let started = std::time::Instant::now();
                     let result = match (shared, target) {
                         (Some(shared), _) => set_dpi_on(&shared, req.dpi).await.map_err(|e| format!("{e}")),
                         (None, Some(target)) => set_dpi(&target, req.dpi).await.map_err(|e| format!("{e}")),
                         (None, None) => Err("no active device".to_string()),
                     };
+                    let elapsed = started.elapsed();
+                    match &result {
+                        Ok(()) => info!(dpi = req.dpi, ?elapsed, "control DPI write ok"),
+                        Err(e) => warn!(dpi = req.dpi, error = %e, ?elapsed, "control DPI write failed"),
+                    }
                     let _ = req.reply.send(result);
                 });
             }

@@ -127,7 +127,9 @@ fn apply_set_dpi(
     if dpi_request_tx.send(DpiRequest { dpi, reply: reply_tx }).is_err() {
         return "err app is shutting down".to_string();
     }
-    match reply_rx.recv_timeout(Duration::from_secs(5)) {
+    // 8 s, not a couple: the device may be asleep and the first HID write after
+    // idle has to wake it before it answers (subsequent writes are ~100 ms).
+    match reply_rx.recv_timeout(Duration::from_secs(8)) {
         Ok(Ok(())) => {
             info!(dpi, "DPI set via control channel");
             // Keep the slider label in step with the out-of-process change.

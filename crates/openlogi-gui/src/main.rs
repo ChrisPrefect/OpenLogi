@@ -72,7 +72,9 @@ use crate::state::{AppState, DpiCycleState, RepeatConfig};
     reason = "startup orchestration: watcher spawns + the GPUI run/event loop read most clearly inline"
 )]
 fn main() -> Result<()> {
-    init_tracing();
+    // CLI client invocations are handled first, *before* `init_tracing` — they
+    // print their own result and must not initialise the file logger, which
+    // would truncate the running instance's `openlogi.log` out from under it.
 
     // Headless self-update from GitHub: `OpenLogi.exe --update`.
     if std::env::args().any(|a| a == "--update") {
@@ -92,6 +94,8 @@ fn main() -> Result<()> {
         attach_parent_console();
         std::process::exit(control::run_set_dpi_cli(&raw));
     }
+
+    init_tracing();
 
     let _guard = match platform::single_instance::acquire() {
         Ok(g) => g,
