@@ -99,12 +99,24 @@ impl DpiPanel {
 }
 
 impl Render for DpiPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (dpi, presets) = cx.try_global::<AppState>().map_or_else(
             || (crate::state::DEFAULT_DPI, Vec::new()),
             |s| (s.dpi, s.dpi_presets()),
         );
         let pal = theme::palette(cx);
+
+        // Keep the slider thumb in step with `AppState.dpi`, which several paths
+        // change without touching the slider: a preset chip, a carousel device
+        // switch, or an out-of-process `--set-dpi`. Compared on the clamped value
+        // so an in-progress drag (which already wrote `AppState.dpi`) doesn't
+        // fight itself; `set_value` emits no `Change`, so this can't loop.
+        if clamp_dpi(self.slider_state.read(cx).value().start()) != dpi {
+            self.slider_state
+                .update(cx, |slider, slider_cx| {
+                    slider.set_value(dpi_to_f32(dpi), window, slider_cx);
+                });
+        }
 
         let preset_chips: Vec<AnyElement> = presets
             .iter()
