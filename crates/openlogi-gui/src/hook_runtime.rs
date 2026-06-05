@@ -50,6 +50,7 @@ pub fn start(
     dpi_cycle: Arc<RwLock<DpiCycleState>>,
     capture: CaptureChannel,
     repeat_config: Arc<RwLock<RepeatConfig>>,
+    rearm_tx: UnboundedSender<()>,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -82,6 +83,14 @@ pub fn start(
             // even unbound ones — so the UI doubles as a detection indicator.
             if pressed {
                 flash_button(id);
+                // A Back/Forward press reaching this OS-hook path means the HID++
+                // diversion has lapsed — typically after the (Bluetooth) mouse
+                // slept and woke and dropped its diverted-control state. A
+                // diverted button would arrive over HID++, not here. Nudge the
+                // capture watcher to re-arm so hold-to-repeat works again.
+                if matches!(id, ButtonId::Back | ButtonId::Forward) {
+                    let _ = rearm_tx.send(());
+                }
             }
 
             let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());

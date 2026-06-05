@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 use openlogi_hid::{
@@ -61,6 +61,7 @@ pub fn spawn(
     capture_channel: CaptureChannel,
     repeat_config: Arc<RwLock<RepeatConfig>>,
     dpi_request_rx: mpsc::UnboundedReceiver<DpiRequest>,
+    rearm_rx: mpsc::UnboundedReceiver<()>,
 ) {
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -80,6 +81,7 @@ pub fn spawn(
             capture_channel,
             repeat_config,
             dpi_request_rx,
+            rearm_rx,
         ));
     });
 }
@@ -105,6 +107,7 @@ async fn manage(
     capture_channel: CaptureChannel,
     repeat_config: Arc<RwLock<RepeatConfig>>,
     mut dpi_request_rx: mpsc::UnboundedReceiver<DpiRequest>,
+    mut rearm_rx: mpsc::UnboundedReceiver<()>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<CapturedInput>();
     let mut current: Option<(DeviceRoute, bool)> = None;
@@ -115,6 +118,8 @@ async fn manage(
     let mut ticker = tokio::time::interval(TARGET_POLL);
     // Live auto-repeat timers, one per currently-held repeatable button.
     let mut repeats: HashMap<ButtonId, JoinHandle<()>> = HashMap::new();
+    // When we last forced a re-arm, to debounce the stream of hook nudges.
+    let mut last_rearm: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -159,6 +164,24 @@ async fn manage(
                     }
                     let _ = req.reply.send(result);
                 });
+            }
+            // A side button surfaced on the OS-hook path → its HID++ diversion
+            // lapsed (e.g. the mouse slept and woke). Drop the current session so
+            // the next tick opens a fresh one and re-diverts. Debounced, since the
+            // hook nudges on every such press until the re-arm takes effect.
+            Some(()) = rearm_rx.recv() => {
+                if last_rearm.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                    last_rearm = Some(Instant::now());
+                    warn!("side button seen on OS-hook path — re-arming HID++ capture session");
+                    if let Some(stop) = stop.take() {
+                        let _ = stop.send(());
+                    }
+                    for (_, handle) in repeats.drain() {
+                        handle.abort();
+                    }
+                    current = None;
+                    session = None;
+                }
             }
             _ = ticker.tick() => {
                 let target = dpi_cycle.read().ok().and_then(|guard| guard.target.clone());

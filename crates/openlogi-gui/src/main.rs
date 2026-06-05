@@ -125,11 +125,16 @@ fn main() -> Result<()> {
     let repeat_config = Arc::new(RwLock::new(RepeatConfig::from_settings(
         &initial_config.app_settings,
     )));
+    // The OS hook nudges this when a side button surfaces on its path (meaning
+    // the HID++ diversion lapsed, e.g. after the mouse slept); the gesture
+    // watcher then re-arms the capture session.
+    let (rearm_tx, rearm_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let hook_arcs = (
         Arc::clone(&hook_bindings),
         Arc::clone(&dpi_cycle),
         Arc::clone(&capture_channel),
         Arc::clone(&repeat_config),
+        rearm_tx,
     );
 
     // Resolve the UI locale before any menu or window is built so the first
@@ -151,6 +156,7 @@ fn main() -> Result<()> {
         Arc::clone(&capture_channel),
         Arc::clone(&repeat_config),
         dpi_request_rx,
+        rearm_rx,
     );
 
     let mut inventory_rx = watchers::inventory::spawn(std::time::Duration::from_secs(2));
@@ -327,6 +333,7 @@ fn main() -> Result<()> {
                                 Arc::clone(&hook_arcs.1),
                                 Arc::clone(&hook_arcs.2),
                                 Arc::clone(&hook_arcs.3),
+                                hook_arcs.4.clone(),
                             );
                         }
                     }
